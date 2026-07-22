@@ -195,23 +195,24 @@ Keys: `q` to quit, `Tab` to cycle sections, `+`/`-` to adjust refresh rate
 ## Commands
 
 | Command | Description |
-|---|---|
-| `status` | System information (firmware, IP, MAC, temperature) |
-| `ports` | Port status, speed, flow control, EEE |
-| `statistics [--watch]` | Port traffic counters (live every 2s) |
+|---|---|---|
+| `status` | System information (temperature, IP, MAC, firmware) |
+| `ports` | Port status and settings |
+| `statistics` | Port traffic statistics (add `--watch` for live refresh) |
 | `mac` | Dynamic MAC address table |
-| `static-mac` | Static MAC entries |
-| `trunk` | Link aggregation / LACP status |
-| `vlan` | Port VLAN (PVID, frame type) |
-| `stp` | Spanning Tree Protocol status (per-port) |
-| `loop` | Loop protection violation status |
-| `config-init` | Generate a sample config file template |
+| `static-mac` | Static MAC address table |
+| `trunk` | Link aggregation / trunk status |
+| `vlan` | VLAN configuration |
+| `stp` | Spanning Tree Protocol status |
+| `loop` | Loop protection status |
 | `igmp` | IGMP snooping configuration |
-| `storm` | Storm control settings |
-| `mirror` | Port mirroring configuration |
-| `network` | IP, gateway, DNS settings |
-| `all` | Everything in one view |
-| `monitor` | TUI dashboard (requires `tui` feature) |
+| `storm` | Storm control configuration |
+| `mirror` | Port mirror configuration |
+| `network` | Network settings (IP, gateway, DNS) |
+| `all` | Show all information at once |
+| `monitor` | TUI dashboard (live monitoring; requires `tui` feature) |
+| `config-init` | Generate a sample config file template (prints to stdout) |
+| `help` | Print help for a given subcommand |
 
 ## Options
 
