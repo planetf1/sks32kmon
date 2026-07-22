@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 description = "CLI + TUI manager for XikeStor SKS3200-8E2X switches"
 license = "Apache-2.0"
+repository = "https://github.com/planetf1/sks32kmon"
+homepage = "https://github.com/planetf1/sks32kmon"
+keywords = ["xikestor", "switch", "networking", "cli", "tui"]
+categories = ["command-line-utilities", "network-programming"]
 
 [features]
 default = ["cli", "tui"]

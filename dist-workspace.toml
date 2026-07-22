@@ -1,0 +1,13 @@
+[workspace]
+members = ["cargo:."]
+
+[dist]
+ci = "github"
+installers = ["shell", "homebrew"]
+tap = "planetf1/homebrew-tap"
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]
+install-path = "CARGO_HOME"
+publish-jobs = ["homebrew"]
+pr-run-mode = "plan"
+cargo-dist-version = "0.31.0"
+install-updater = false
