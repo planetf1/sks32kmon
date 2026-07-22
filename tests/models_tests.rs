@@ -111,7 +111,7 @@ fn test_port_settings_ports_order() {
             id = id
         )
     };
-    let ports: Vec<String> = (1..=10).map(|i| json(i)).collect();
+    let ports: Vec<String> = (1..=10).map(json).collect();
     let full = format!(
         r#"{{"PortNum":"10","PortMode":"PORT_MODE_8_PLUS_2",{}}}"#,
         ports.join(",")
@@ -138,7 +138,7 @@ fn test_port_settings_roundtrip() {
             spd = if id == 1 { "1000MbpsFull" } else { "Link Down" }
         )
     };
-    let ports: Vec<String> = (1..=10).map(|i| json(i)).collect();
+    let ports: Vec<String> = (1..=10).map(json).collect();
     let full = format!(
         r#"{{"PortNum":"10","PortMode":"PORT_MODE_8_PLUS_2",{}}}"#,
         ports.join(",")
@@ -197,7 +197,7 @@ fn test_port_stats_ports_order() {
             id = id
         )
     };
-    let ports: Vec<String> = (1..=10).map(|i| json(i)).collect();
+    let ports: Vec<String> = (1..=10).map(json).collect();
     let full = format!(r#"{{"PortNum":"10",{}}}"#, ports.join(","));
     let resp: PortStatisticsResponse = serde_json::from_str(&full).unwrap();
     let vec = resp.ports();
@@ -221,7 +221,7 @@ fn test_port_statistics_roundtrip() {
             id = id
         )
     };
-    let ports: Vec<String> = (1..=10).map(|i| json(i)).collect();
+    let ports: Vec<String> = (1..=10).map(json).collect();
     let full = format!(r#"{{"PortNum":"10",{}}}"#, ports.join(","));
     let orig: PortStatisticsResponse = serde_json::from_str(&full).unwrap();
     let serialized = serde_json::to_string(&orig).unwrap();
@@ -340,7 +340,7 @@ fn test_port_vlan_ports_order() {
             id = id
         )
     };
-    let ports: Vec<String> = (1..=10).map(|i| json(i)).collect();
+    let ports: Vec<String> = (1..=10).map(json).collect();
     let full = format!(r#"{{"PortNum":10,{}}}"#, ports.join(","));
     let resp: PortVlanResponse = serde_json::from_str(&full).unwrap();
     for (i, port) in resp.ports().iter().enumerate() {
@@ -412,9 +412,9 @@ fn test_loop_status_all_violations() {
     let ls: LoopStatusResponse = serde_json::from_str(&json).unwrap();
     let v = ls.violations();
     assert_eq!(v.len(), 10);
-    for i in 0..10 {
-        assert_eq!(v[i].0, (i + 1) as u32);
-        assert_eq!(*v[i].1, (i + 1).to_string());
+    for (i, (port, status)) in v.iter().enumerate().take(10) {
+        assert_eq!(*port, (i + 1) as u32);
+        assert_eq!(status.as_str(), (i + 1).to_string());
     }
 }
 

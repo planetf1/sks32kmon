@@ -439,7 +439,7 @@ fn cmd_trunk(client: &SwitchClient, json: bool) -> Result<()> {
 
         let ptype = raw
             .get(&type_key)
-            .and_then(|v| v.get(&format!("portTypeId_{}", port_id)))
+            .and_then(|v| v.get(format!("portTypeId_{}", port_id)))
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
         let group = raw.get(&grp_key).and_then(|v| v.as_u64()).unwrap_or(0);
@@ -494,7 +494,7 @@ fn cmd_vlan(client: &SwitchClient, json: bool) -> Result<()> {
         println!(
             " {} {} {}",
             port_str,
-            pad_str(&p.pvid, 8),
+            pad_str(p.pvid, 8),
             pad_str(frame_str, 12)
         );
     }
@@ -542,17 +542,17 @@ fn cmd_stp(client: &SwitchClient, json: bool) -> Result<()> {
     for port_id in 1..=port_count {
         let pfx = format!("Port_{}", port_id);
         // Extract per-port fields from the raw JSON flattened data
-        let port_raw = stp.raw.get(&pfx);
+        let port_raw = stp.raw.get(pfx);
         let status = port_raw
-            .and_then(|v| v.get(&format!("Stp_Status_{port_id}")))
+            .and_then(|v| v.get(format!("Stp_Status_{port_id}")))
             .and_then(|v| v.as_str())
             .unwrap_or("Unknown");
         let edge = port_raw
-            .and_then(|v| v.get(&format!("Stp_Edge_{port_id}")))
+            .and_then(|v| v.get(format!("Stp_Edge_{port_id}")))
             .and_then(|v| v.as_str())
             .unwrap_or("0");
         let path_cost = port_raw
-            .and_then(|v| v.get(&format!("Stp_PathCost_{port_id}")))
+            .and_then(|v| v.get(format!("Stp_PathCost_{port_id}")))
             .and_then(|v| v.as_str())
             .unwrap_or("");
 

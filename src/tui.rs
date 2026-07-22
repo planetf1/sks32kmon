@@ -207,16 +207,8 @@ pub fn run_tui(targets: &[SwitchTarget]) -> Result<()> {
                             app.refresh_interval = (app.refresh_interval + 1).min(60);
                         }
                         KeyCode::Up => match app.active_pane {
-                            0 => {
-                                if app.scroll_offset_port > 0 {
-                                    app.scroll_offset_port -= 1;
-                                }
-                            }
-                            1 => {
-                                if app.scroll_offset_mac > 0 {
-                                    app.scroll_offset_mac -= 1;
-                                }
-                            }
+                            0 if app.scroll_offset_port > 0 => app.scroll_offset_port -= 1,
+                            1 if app.scroll_offset_mac > 0 => app.scroll_offset_mac -= 1,
                             _ => {}
                         },
                         KeyCode::Down => match app.active_pane {

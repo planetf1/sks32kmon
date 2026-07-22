@@ -97,7 +97,7 @@ fn test_active_port_count_all_down() {
             id = id
         )
     };
-    let ports: Vec<String> = (1..=10).map(|i| port(i)).collect();
+    let ports: Vec<String> = (1..=10).map(port).collect();
     let json = format!(
         r#"{{"PortNum":"10","PortMode":"PORT_MODE_8_PLUS_2",{}}}"#,
         ports.join(",")
@@ -271,7 +271,7 @@ fn port_vlan_json() -> String {
             id = id
         )
     };
-    let ports: Vec<String> = (1..=10).map(|i| port(i)).collect();
+    let ports: Vec<String> = (1..=10).map(port).collect();
     format!(r#"{{"PortNum":10,{}}}"#, ports.join(","))
 }
 
@@ -426,7 +426,7 @@ fn port_mirror_json() -> String {
             id = id
         )
     };
-    let ports: Vec<String> = (1..=10).map(|i| port(i)).collect();
+    let ports: Vec<String> = (1..=10).map(port).collect();
     format!(
         r#"{{"PortNum":"10","MonitoringPortId":"0",{}}}"#,
         ports.join(",")

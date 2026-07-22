@@ -11,27 +11,20 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  format:
-    name: Format
+  pre-commit:
+    name: Lint & format
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
-          components: rustfmt
-      - run: cargo fmt --all -- --check
-
-  lint:
-    name: Clippy
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v5
         with:
-          toolchain: stable
-          components: clippy
-      - run: cargo clippy --all-targets --all-features -- -D warnings
+          python-version: "3.12"
+      - run: pip install pre-commit
+      - run: pre-commit run --all-files --show-diff-on-failure
 
   test:
     name: Test
