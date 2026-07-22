@@ -1,6 +1,6 @@
 [package]
 name = "sks3200"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "CLI + TUI manager for XikeStor SKS3200-8E2X switches"
 license = "Apache-2.0"
