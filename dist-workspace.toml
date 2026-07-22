@@ -11,3 +11,4 @@ publish-jobs = ["homebrew"]
 pr-run-mode = "plan"
 cargo-dist-version = "0.31.0"
 install-updater = false
+allow-dirty = ["ci"]
