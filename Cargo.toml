@@ -1,0 +1,27 @@
+[package]
+name = "sks3200"
+version = "0.1.0"
+edition = "2021"
+description = "CLI + TUI manager for XikeStor SKS3200-8E2X switches"
+license = "Apache-2.0"
+
+[features]
+default = ["cli", "tui"]
+cli = ["dep:clap", "dep:clap-verbosity-flag"]
+tui = ["dep:ratatui", "dep:crossterm"]
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["blocking", "cookies", "json"] }
+chrono = { version = "0.4", features = ["serde"] }
+colored = "3"
+md-5 = "0.10"
+toml = "0.8"
+
+clap = { version = "4", optional = true, features = ["derive", "env"] }
+clap-verbosity-flag = { version = "3", optional = true }
+
+ratatui = { version = "0.29", optional = true, default-features = false, features = ["crossterm"] }
+crossterm = { version = "0.28", optional = true }
