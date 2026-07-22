@@ -112,12 +112,20 @@ fn test_port_settings_ports_order() {
         )
     };
     let ports: Vec<String> = (1..=10).map(|i| json(i)).collect();
-    let full = format!(r#"{{"PortNum":"10","PortMode":"PORT_MODE_8_PLUS_2",{}}}"#, ports.join(","));
+    let full = format!(
+        r#"{{"PortNum":"10","PortMode":"PORT_MODE_8_PLUS_2",{}}}"#,
+        ports.join(",")
+    );
     let resp: PortSettingsResponse = serde_json::from_str(&full).unwrap();
     let vec = resp.ports();
     assert_eq!(vec.len(), 10);
     for (i, port) in vec.iter().enumerate() {
-        assert_eq!(port.port_id, (i + 1).to_string(), "port_id mismatch at index {}", i);
+        assert_eq!(
+            port.port_id,
+            (i + 1).to_string(),
+            "port_id mismatch at index {}",
+            i
+        );
     }
 }
 
@@ -131,7 +139,10 @@ fn test_port_settings_roundtrip() {
         )
     };
     let ports: Vec<String> = (1..=10).map(|i| json(i)).collect();
-    let full = format!(r#"{{"PortNum":"10","PortMode":"PORT_MODE_8_PLUS_2",{}}}"#, ports.join(","));
+    let full = format!(
+        r#"{{"PortNum":"10","PortMode":"PORT_MODE_8_PLUS_2",{}}}"#,
+        ports.join(",")
+    );
     let orig: PortSettingsResponse = serde_json::from_str(&full).unwrap();
     let serialized = serde_json::to_string(&orig).unwrap();
     let des: PortSettingsResponse = serde_json::from_str(&serialized).unwrap();
@@ -192,7 +203,12 @@ fn test_port_stats_ports_order() {
     let vec = resp.ports();
     assert_eq!(vec.len(), 10);
     for (i, p) in vec.iter().enumerate() {
-        assert_eq!(p.port_id, (i + 1).to_string(), "port_id mismatch at index {}", i);
+        assert_eq!(
+            p.port_id,
+            (i + 1).to_string(),
+            "port_id mismatch at index {}",
+            i
+        );
     }
 }
 
@@ -319,7 +335,10 @@ fn test_port_vlan_entry_different_pvid() {
 #[test]
 fn test_port_vlan_ports_order() {
     let json = |id: u32| -> String {
-        format!(r#""Port_{id}":{{"Port_Id":{id},"PVID":1,"Frame_Type":0}}"#, id = id)
+        format!(
+            r#""Port_{id}":{{"Port_Id":{id},"PVID":1,"Frame_Type":0}}"#,
+            id = id
+        )
     };
     let ports: Vec<String> = (1..=10).map(|i| json(i)).collect();
     let full = format!(r#"{{"PortNum":10,{}}}"#, ports.join(","));
@@ -459,10 +478,7 @@ fn test_stp_config_roundtrip() {
     assert_eq!(des.stp_rstp_mode, stp.stp_rstp_mode);
     assert_eq!(des.num_ports, stp.num_ports);
     // The raw Port_1 data should survive roundtrip via flatten
-    assert_eq!(
-        des.raw["Port_1"]["Stp_Status_1"],
-        "Forward"
-    );
+    assert_eq!(des.raw["Port_1"]["Stp_Status_1"], "Forward");
 }
 
 // ---------------------------------------------------------------------------
@@ -630,7 +646,10 @@ fn test_missing_required_field_fails() {
     // Temperature is required — absence should fail
     let json = r#"{"sys_ipv4":"1.2.3.4","sys_macaddr":"00:00:00:00:00:00","fw_ver":"1.0","hw_ver":"A0","des":"test"}"#;
     let result: Result<SystemInfo, _> = serde_json::from_str(json);
-    assert!(result.is_err(), "Expected deserialization to fail when field is missing");
+    assert!(
+        result.is_err(),
+        "Expected deserialization to fail when field is missing"
+    );
 }
 
 #[test]
@@ -638,5 +657,8 @@ fn test_null_fields_fail() {
     // serde expects the field types (String etc.), not null
     let json = r#"{"temperature":null,"sys_ipv4":"1.2.3.4","sys_macaddr":"00:00:00:00:00:00","fw_ver":"1.0","hw_ver":"A0","des":"test"}"#;
     let result: Result<SystemInfo, _> = serde_json::from_str(json);
-    assert!(result.is_err(), "Expected deserialization to fail on null field");
+    assert!(
+        result.is_err(),
+        "Expected deserialization to fail on null field"
+    );
 }

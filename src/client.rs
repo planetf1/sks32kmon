@@ -151,7 +151,9 @@ impl SwitchClient {
             bail!("GET {} returned HTTP {}", endpoint, resp.status());
         }
 
-        let body = resp.text().with_context(|| format!("Read {} failed", endpoint))?;
+        let body = resp
+            .text()
+            .with_context(|| format!("Read {} failed", endpoint))?;
 
         // Check for session expiry
         if body.contains("login.html") {
@@ -175,7 +177,9 @@ impl SwitchClient {
             bail!("GET {} returned HTTP {}", endpoint, resp.status());
         }
 
-        let body = resp.text().with_context(|| format!("Read {} failed", endpoint))?;
+        let body = resp
+            .text()
+            .with_context(|| format!("Read {} failed", endpoint))?;
 
         if body.contains("login.html") {
             bail!("Session expired — please reconnect");

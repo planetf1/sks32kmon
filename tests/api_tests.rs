@@ -77,15 +77,13 @@ fn test_deserialize_port_settings() {
 
 #[test]
 fn test_port_settings_ports_returns_10() {
-    let resp: PortSettingsResponse =
-        serde_json::from_str(&port_settings_json()).unwrap();
+    let resp: PortSettingsResponse = serde_json::from_str(&port_settings_json()).unwrap();
     assert_eq!(resp.ports().len(), 10);
 }
 
 #[test]
 fn test_active_port_count() {
-    let resp: PortSettingsResponse =
-        serde_json::from_str(&port_settings_json()).unwrap();
+    let resp: PortSettingsResponse = serde_json::from_str(&port_settings_json()).unwrap();
     // Port_2 is the only one with a non-"Link Down" speed
     assert_eq!(resp.active_port_count(), 1);
 }
@@ -153,8 +151,7 @@ fn test_deserialize_port_statistics() {
 
 #[test]
 fn test_port_statistics_ports_returns_10() {
-    let resp: PortStatisticsResponse =
-        serde_json::from_str(&port_stats_json()).unwrap();
+    let resp: PortStatisticsResponse = serde_json::from_str(&port_stats_json()).unwrap();
     assert_eq!(resp.ports().len(), 10);
 }
 
@@ -303,8 +300,7 @@ fn test_port_vlan_ports_returns_10() {
 #[test]
 fn test_deserialize_igmp_config() {
     let json = r#"{"igmp":"on","fast_leave":"on","report_flood":"off"}"#;
-    let cfg: IgmpConfig =
-        serde_json::from_str(json).expect("IgmpConfig deserialization failed");
+    let cfg: IgmpConfig = serde_json::from_str(json).expect("IgmpConfig deserialization failed");
     assert_eq!(cfg.igmp, "on");
     assert_eq!(cfg.fast_leave, "on");
     assert_eq!(cfg.report_flood, "off");
@@ -509,18 +505,12 @@ fn test_md5_hash_admin() {
 
 #[test]
 fn test_md5_hash_empty() {
-    assert_eq!(
-        md5_hash(""),
-        "d41d8cd98f00b204e9800998ecf8427e"
-    );
+    assert_eq!(md5_hash(""), "d41d8cd98f00b204e9800998ecf8427e");
 }
 
 #[test]
 fn test_md5_hash_password() {
-    assert_eq!(
-        md5_hash("password"),
-        "5f4dcc3b5aa765d61d8327deb882cf99"
-    );
+    assert_eq!(md5_hash("password"), "5f4dcc3b5aa765d61d8327deb882cf99");
 }
 
 #[test]
@@ -605,17 +595,15 @@ fn test_from_str_loop_status() {
 
 #[test]
 fn test_from_str_stp_config() {
-    let _: StpConfig = serde_json::from_str(
-        r#"{"stp_enable":"1","stp_rstp_mode":"RSTP","num_ports":"10"}"#,
-    )
-    .expect("StpConfig from_str");
+    let _: StpConfig =
+        serde_json::from_str(r#"{"stp_enable":"1","stp_rstp_mode":"RSTP","num_ports":"10"}"#)
+            .expect("StpConfig from_str");
 }
 
 #[test]
 fn test_from_str_storm_control() {
     let _: StormControlResponse =
-        serde_json::from_str(r#"{"portnum":8,"ports":[]}"#)
-            .expect("StormControlResponse from_str");
+        serde_json::from_str(r#"{"portnum":8,"ports":[]}"#).expect("StormControlResponse from_str");
 }
 
 #[test]
@@ -627,16 +615,13 @@ fn test_from_str_port_mirror() {
 #[test]
 fn test_from_str_port_pvids() {
     let _: PortPvidsResponse =
-        serde_json::from_str(r#"{"port_pvids":[1,1,1]}"#)
-            .expect("PortPvidsResponse from_str");
+        serde_json::from_str(r#"{"port_pvids":[1,1,1]}"#).expect("PortPvidsResponse from_str");
 }
 
 #[test]
 fn test_from_str_trunk_config() {
-    let _: TrunkConfigResponse = serde_json::from_str(
-        r#"{"PortNum":8,"system_priority":32768}"#,
-    )
-    .expect("TrunkConfigResponse from_str");
+    let _: TrunkConfigResponse = serde_json::from_str(r#"{"PortNum":8,"system_priority":32768}"#)
+        .expect("TrunkConfigResponse from_str");
 }
 
 // ---------------------------------------------------------------------------

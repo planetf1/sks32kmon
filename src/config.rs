@@ -44,8 +44,7 @@ pub struct SwitchTarget {
 
 /// Returns the default config file path: `~/.config/sks3200/config.toml`
 pub fn default_config_path() -> PathBuf {
-    let home = std::env::var("HOME")
-        .unwrap_or_else(|_| ".".to_string());
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home)
         .join(".config")
         .join("sks3200")
@@ -103,9 +102,9 @@ pub fn resolve_switches(
 
         for item in switches_arg {
             // Try to look up by name in config
-            let found = config_switches.iter().find(|s| {
-                s.name.as_deref() == Some(item.as_str())
-            });
+            let found = config_switches
+                .iter()
+                .find(|s| s.name.as_deref() == Some(item.as_str()));
 
             match found {
                 Some(def) => targets.push(SwitchTarget {
@@ -119,8 +118,7 @@ pub fn resolve_switches(
                     let user = cli_user.unwrap_or("admin").to_string();
                     let password = cli_password.map(|s| s.to_string()).unwrap_or_else(|| {
                         // Try env var as last resort
-                        std::env::var("SKS3200_PASSWORD")
-                            .unwrap_or_default()
+                        std::env::var("SKS3200_PASSWORD").unwrap_or_default()
                     });
                     if password.is_empty() {
                         bail!(
@@ -161,12 +159,11 @@ pub fn resolve_switches(
             .collect())
     } else {
         // No config, no --switch — try env var
-        let host = std::env::var("SKS3200_HOST")
-            .unwrap_or_else(|_| "192.168.100.7".to_string());
+        let host = std::env::var("SKS3200_HOST").unwrap_or_else(|_| "192.168.100.7".to_string());
         let user = cli_user.unwrap_or("admin").to_string();
-        let password = cli_password.map(|s| s.to_string()).unwrap_or_else(|| {
-            std::env::var("SKS3200_PASSWORD").unwrap_or_default()
-        });
+        let password = cli_password
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| std::env::var("SKS3200_PASSWORD").unwrap_or_default());
         if password.is_empty() {
             bail!(
                 "No password. Use --password, SKS3200_PASSWORD, or configure switches in {}",

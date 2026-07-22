@@ -28,7 +28,12 @@ use crate::tui;
 pub struct Args {
     /// Switch names or IPs (from config, or ad-hoc). Repeatable, comma-separated.
     /// Defaults to all configured switches if omitted.
-    #[arg(short = 's', long = "switch", env = "SKS3200_HOST", value_delimiter = ',')]
+    #[arg(
+        short = 's',
+        long = "switch",
+        env = "SKS3200_HOST",
+        value_delimiter = ','
+    )]
     pub switches: Vec<String>,
 
     /// Path to config file (default: ~/.config/sks3200/config.toml)
@@ -136,8 +141,7 @@ pub fn run(args: Args) -> Result<()> {
                 if i > 0 {
                     println!();
                 }
-                let client =
-                    SwitchClient::connect(&target.host, &target.user, &target.password)?;
+                let client = SwitchClient::connect(&target.host, &target.user, &target.password)?;
                 run_command_on(cmd, &client, args.json, target)?;
             }
         }
@@ -351,7 +355,10 @@ fn cmd_mac(client: &SwitchClient, json: bool) -> Result<()> {
         entries.len().to_string().cyan()
     );
     println!("{}", "╌".repeat(90));
-    println!(" {:<3} {:<22} {:<6} {:<6} {:<6}", "#", "MAC Address", "VLAN", "Port", "Age");
+    println!(
+        " {:<3} {:<22} {:<6} {:<6} {:<6}",
+        "#", "MAC Address", "VLAN", "Port", "Age"
+    );
     println!("{}", "─".repeat(90));
 
     for (i, e) in entries.iter().enumerate() {
@@ -382,11 +389,20 @@ fn cmd_static_mac(client: &SwitchClient, json: bool) -> Result<()> {
         entries.len().to_string().cyan()
     );
     println!("{}", "╌".repeat(60));
-    println!(" {:<3} {:<22} {:<6} {:<6}", "#", "MAC Address", "VLAN", "Port");
+    println!(
+        " {:<3} {:<22} {:<6} {:<6}",
+        "#", "MAC Address", "VLAN", "Port"
+    );
     println!("{}", "─".repeat(60));
 
     for (i, e) in entries.iter().enumerate() {
-        println!(" {:<3} {:<22} {:<6} {:<6}", i + 1, e.mac_addr, e.vlan_id, e.port_id);
+        println!(
+            " {:<3} {:<22} {:<6} {:<6}",
+            i + 1,
+            e.mac_addr,
+            e.vlan_id,
+            e.port_id
+        );
     }
 
     Ok(())
@@ -475,7 +491,12 @@ fn cmd_vlan(client: &SwitchClient, json: bool) -> Result<()> {
             _ => "Unknown",
         };
         let port_str = pad_str(format!("Port {}", p.port_id), 7).bold().to_string();
-        println!(" {} {} {}", port_str, pad_str(&p.pvid, 8), pad_str(frame_str, 12));
+        println!(
+            " {} {} {}",
+            port_str,
+            pad_str(&p.pvid, 8),
+            pad_str(frame_str, 12)
+        );
     }
 
     if let Some(pvids) = pvids {
@@ -579,7 +600,12 @@ fn cmd_loop(client: &SwitchClient, json: bool) -> Result<()> {
         println!("  {} No loop violations detected", "✓".green());
     } else {
         for (port, status) in &violations {
-            println!("  {} Port {}: violation detected ({})", "✗".red(), port, status);
+            println!(
+                "  {} Port {}: violation detected ({})",
+                "✗".red(),
+                port,
+                status
+            );
         }
     }
 
@@ -661,10 +687,7 @@ fn cmd_storm(client: &SwitchClient, json: bool) -> Result<()> {
             } else {
                 pad_str("0", 12).dimmed().to_string()
             };
-            println!(
-                " {} {} {} {} {}",
-                port_str, bcast, mcast, ucast, unmcast,
-            );
+            println!(" {} {} {} {} {}", port_str, bcast, mcast, ucast, unmcast,);
         }
     }
 

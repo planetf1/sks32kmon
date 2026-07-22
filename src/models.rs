@@ -85,8 +85,16 @@ pub struct PortSettingsResponse {
 impl PortSettingsResponse {
     pub fn ports(&self) -> Vec<&PortCfg> {
         vec![
-            &self.port_1, &self.port_2, &self.port_3, &self.port_4, &self.port_5,
-            &self.port_6, &self.port_7, &self.port_8, &self.port_9, &self.port_10,
+            &self.port_1,
+            &self.port_2,
+            &self.port_3,
+            &self.port_4,
+            &self.port_5,
+            &self.port_6,
+            &self.port_7,
+            &self.port_8,
+            &self.port_9,
+            &self.port_10,
         ]
     }
 
@@ -149,8 +157,16 @@ pub struct PortStatisticsResponse {
 impl PortStatisticsResponse {
     pub fn ports(&self) -> Vec<&PortStats> {
         vec![
-            &self.port_1, &self.port_2, &self.port_3, &self.port_4, &self.port_5,
-            &self.port_6, &self.port_7, &self.port_8, &self.port_9, &self.port_10,
+            &self.port_1,
+            &self.port_2,
+            &self.port_3,
+            &self.port_4,
+            &self.port_5,
+            &self.port_6,
+            &self.port_7,
+            &self.port_8,
+            &self.port_9,
+            &self.port_10,
         ]
     }
 }
@@ -324,8 +340,16 @@ pub struct PortVlanResponse {
 impl PortVlanResponse {
     pub fn ports(&self) -> Vec<&PortVlanEntry> {
         vec![
-            &self.port_1, &self.port_2, &self.port_3, &self.port_4, &self.port_5,
-            &self.port_6, &self.port_7, &self.port_8, &self.port_9, &self.port_10,
+            &self.port_1,
+            &self.port_2,
+            &self.port_3,
+            &self.port_4,
+            &self.port_5,
+            &self.port_6,
+            &self.port_7,
+            &self.port_8,
+            &self.port_9,
+            &self.port_10,
         ]
     }
 }

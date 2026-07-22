@@ -105,7 +105,7 @@ struct TuiApp {
     current_switch: usize,
     scroll_offset_port: usize,
     scroll_offset_mac: usize,
-    active_pane: usize, // 0 = port pane, 1 = mac pane
+    active_pane: usize,    // 0 = port pane, 1 = mac pane
     refresh_interval: u64, // seconds
 }
 
@@ -187,8 +187,7 @@ pub fn run_tui(targets: &[SwitchTarget]) -> Result<()> {
                             app.refresh_all();
                         }
                         KeyCode::Tab | KeyCode::Right => {
-                            app.current_switch =
-                                (app.current_switch + 1) % app.switches.len();
+                            app.current_switch = (app.current_switch + 1) % app.switches.len();
                             app.scroll_offset_port = 0;
                             app.scroll_offset_mac = 0;
                         }
@@ -236,7 +235,10 @@ pub fn run_tui(targets: &[SwitchTarget]) -> Result<()> {
     }
 
     crossterm::terminal::disable_raw_mode()?;
-    crossterm::execute!(terminal.backend_mut(), crossterm::terminal::LeaveAlternateScreen)?;
+    crossterm::execute!(
+        terminal.backend_mut(),
+        crossterm::terminal::LeaveAlternateScreen
+    )?;
     println!("monitor closed");
     Ok(())
 }
@@ -307,10 +309,7 @@ fn render_header(f: &mut Frame, app: &TuiApp, area: Rect) {
                     .add_modifier(Modifier::BOLD),
             ));
         } else {
-            tags.push(Span::styled(
-                label,
-                Style::default().fg(Color::DarkGray),
-            ));
+            tags.push(Span::styled(label, Style::default().fg(Color::DarkGray)));
         }
     }
 
@@ -357,8 +356,12 @@ fn render_port_pane(f: &mut Frame, app: &TuiApp, area: Rect) {
     let stats = match &current.port_stats {
         Some(s) => s,
         None => {
-            let p = Paragraph::new("Waiting for data...")
-                .block(Block::default().borders(Borders::ALL).title(" Ports ").border_style(border_style));
+            let p = Paragraph::new("Waiting for data...").block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Ports ")
+                    .border_style(border_style),
+            );
             f.render_widget(p, area);
             return;
         }
@@ -370,11 +373,14 @@ fn render_port_pane(f: &mut Frame, app: &TuiApp, area: Rect) {
         .scroll_offset_port
         .min(port_data.len().saturating_sub(max_visible));
 
-    let header_cells = ["Port", "Status", "Speed", "Tx/s", "Rx/s"]
-        .iter()
-        .map(|h| Cell::from(Span::styled(*h, Style::default().add_modifier(Modifier::BOLD))));
-    let header = Row::new(header_cells)
-        .style(Style::default().bg(Color::DarkGray).fg(Color::White));
+    let header_cells = ["Port", "Status", "Speed", "Tx/s", "Rx/s"].iter().map(|h| {
+        Cell::from(Span::styled(
+            *h,
+            Style::default().add_modifier(Modifier::BOLD),
+        ))
+    });
+    let header =
+        Row::new(header_cells).style(Style::default().bg(Color::DarkGray).fg(Color::White));
 
     let rows: Vec<Row> = port_data
         .iter()
@@ -405,28 +411,28 @@ fn render_port_pane(f: &mut Frame, app: &TuiApp, area: Rect) {
             };
 
             // Packet rate computation
-            let (tx_rate, rx_rate) =
-                if let (Some(prev), Some(prev_time)) = (&current.prev_port_stats, &current.prev_stats_time)
-                {
-                    let elapsed = prev_time.elapsed().as_secs_f64().max(0.1);
-                    let prev_ports = prev.ports();
-                    let prev_p = prev_ports.get(*i);
-                    match prev_p {
-                        Some(pp) => {
-                            let tx: f64 = p.tx_good_pkt.parse().unwrap_or(0.0);
-                            let ptx: f64 = pp.tx_good_pkt.parse().unwrap_or(0.0);
-                            let rx: f64 = p.rx_good_pkt.parse().unwrap_or(0.0);
-                            let prx: f64 = pp.rx_good_pkt.parse().unwrap_or(0.0);
-                            (
-                                ((tx - ptx).max(0.0) / elapsed) as u64,
-                                ((rx - prx).max(0.0) / elapsed) as u64,
-                            )
-                        }
-                        None => (0, 0),
+            let (tx_rate, rx_rate) = if let (Some(prev), Some(prev_time)) =
+                (&current.prev_port_stats, &current.prev_stats_time)
+            {
+                let elapsed = prev_time.elapsed().as_secs_f64().max(0.1);
+                let prev_ports = prev.ports();
+                let prev_p = prev_ports.get(*i);
+                match prev_p {
+                    Some(pp) => {
+                        let tx: f64 = p.tx_good_pkt.parse().unwrap_or(0.0);
+                        let ptx: f64 = pp.tx_good_pkt.parse().unwrap_or(0.0);
+                        let rx: f64 = p.rx_good_pkt.parse().unwrap_or(0.0);
+                        let prx: f64 = pp.rx_good_pkt.parse().unwrap_or(0.0);
+                        (
+                            ((tx - ptx).max(0.0) / elapsed) as u64,
+                            ((rx - prx).max(0.0) / elapsed) as u64,
+                        )
                     }
-                } else {
-                    (0, 0)
-                };
+                    None => (0, 0),
+                }
+            } else {
+                (0, 0)
+            };
 
             let tx_str = format_rate(tx_rate);
             let rx_str = format_rate(rx_rate);
@@ -457,14 +463,12 @@ fn render_port_pane(f: &mut Frame, app: &TuiApp, area: Rect) {
         Constraint::Length(10),
     ];
 
-    let table = Table::new(rows, widths)
-        .header(header)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Ports ")
-                .border_style(border_style),
-        );
+    let table = Table::new(rows, widths).header(header).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Ports ")
+            .border_style(border_style),
+    );
 
     f.render_widget(table, area);
 }
@@ -484,13 +488,12 @@ fn render_mac_pane(f: &mut Frame, app: &TuiApp, area: Rect) {
     let entries = match &current.mac_entries {
         Some(e) => e,
         None => {
-            let p = Paragraph::new("Waiting for data...")
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(" MAC Table ")
-                        .border_style(border_style),
-                );
+            let p = Paragraph::new("Waiting for data...").block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" MAC Table ")
+                    .border_style(border_style),
+            );
             f.render_widget(p, area);
             return;
         }
@@ -501,11 +504,14 @@ fn render_mac_pane(f: &mut Frame, app: &TuiApp, area: Rect) {
         .scroll_offset_mac
         .min(entries.len().saturating_sub(max_visible));
 
-    let header_cells = ["MAC Address", "VLAN", "Port", "Age"]
-        .iter()
-        .map(|h| Cell::from(Span::styled(*h, Style::default().add_modifier(Modifier::BOLD))));
-    let header = Row::new(header_cells)
-        .style(Style::default().bg(Color::DarkGray).fg(Color::White));
+    let header_cells = ["MAC Address", "VLAN", "Port", "Age"].iter().map(|h| {
+        Cell::from(Span::styled(
+            *h,
+            Style::default().add_modifier(Modifier::BOLD),
+        ))
+    });
+    let header =
+        Row::new(header_cells).style(Style::default().bg(Color::DarkGray).fg(Color::White));
 
     let rows: Vec<Row> = entries
         .iter()
@@ -528,14 +534,12 @@ fn render_mac_pane(f: &mut Frame, app: &TuiApp, area: Rect) {
         Constraint::Length(8),
     ];
 
-    let table = Table::new(rows, widths)
-        .header(header)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!(" MAC Table ({}) ", entries.len()))
-                .border_style(border_style),
-        );
+    let table = Table::new(rows, widths).header(header).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(format!(" MAC Table ({}) ", entries.len()))
+            .border_style(border_style),
+    );
 
     f.render_widget(table, area);
 }
@@ -585,8 +589,8 @@ fn render_footer(f: &mut Frame, app: &TuiApp, area: Rect) {
         ));
     }
 
-    let p = Paragraph::new(Line::from(parts))
-        .style(Style::default().bg(Color::Black).fg(Color::White));
+    let p =
+        Paragraph::new(Line::from(parts)).style(Style::default().bg(Color::Black).fg(Color::White));
     f.render_widget(p, area);
 }
 
