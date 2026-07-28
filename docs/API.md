@@ -276,18 +276,27 @@ Response format TBD (not yet captured).
 
 ---
 
-## Write Endpoints (Phase 2)
+## Write Endpoints (Phase 2 — Implemented)
 
 | Endpoint | Method | Body / Params |
 |---|---|---|
 | `POST /save_all_configs.json` | POST | `{}` (empty) |
-| `POST /apply_user_port_setting.json` | POST | Port config |
+| `POST /apply_user_port_setting.json` | POST | Per-port config (status, speed, flow) |
 | `POST /set_des.json` | POST | `{des: "..."}` |
 | `POST /system_reboot.json` | POST | `{}` |
 | `POST /factory_reset.json` | POST | `{}` |
-| `POST /network_settings_ipv4.json` | POST | IPv4 config |
-| `POST /clear_statistics.json` | GET | (clears port counters) |
-| `POST /mac_clear_dynamic_mac_entries.json` | POST | (clears MAC table) |
+| `POST /network_settings_ipv4.json` | POST | IPv4 config (ip, mask, gw, dns, dhcp) |
+| `GET /clear_statistics.json` | GET | (clears port counters; uses GET not POST) |
+| `POST /mac_clear_dynamic_mac_entries.json` | POST | `{}` (clears MAC table) |
+| `POST /port_vlan.json` | POST | Per-port VLAN (PVID, frame type) |
+| `POST /igmp_config.json` | POST | IGMP snooping (on/off, fast leave, flood) |
+| `POST /storm_ctrl_cfg.json` | POST | Storm control rates per-port (Kbps) |
+| `POST /port_mirror.json` | POST | Mirror destination + per-port source settings |
+| `POST /stp.json` | POST | STP enable/disable + per-port edge |
+| `POST /port_trunk_cfg.json` | POST | Trunk type, group, priority per-port |
+| `POST /port_lock_cfg.json` | POST | Loop protection enable, interval, recovery |
+| `GET /config/download` | GET | Download config backup (binary) |
+| `POST /config/upload` | POST | Upload/restore config (multipart) |
 
 ---
 

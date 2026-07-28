@@ -4,8 +4,11 @@ A Rust CLI + TUI tool for managing **XikeStor (兮克) SKS3200-8E2X** switches
 remotely. These are 8×2.5G + 2×10G SFP+ web-managed switches with a basic
 HTML dashboard — no CLI, no SSH, no SNMP.
 
-**Phase 1: Read-only.** Query system info, port status, traffic statistics,
-MAC tables, VLANs, STP, loop protection, and more from the terminal.
+**Phase 2: Read-write.** Query system info, port status, traffic statistics,
+MAC tables, VLANs, STP, loop protection, and more — plus configure ports, VLANs,
+IGMP, storm control, mirroring, trunk/LACP, loop protection, STP, network settings,
+description, and manage config backups. Write operations run in **mock mode by default**
+(add `--apply` to write to the switch).
 
 ---
 
@@ -17,29 +20,29 @@ sks3200 config-init > ~/.config/sks3200/config.toml
 # Then edit ~/.config/sks3200/config.toml with your switch credentials
 
 # Once configured, query all switches at once
-sks3200 status
+sks3200 show status
 
 # Port status
-sks3200 ports
+sks3200 show ports
 
 # Traffic statistics (live refresh)
-sks3200 statistics --watch
+sks3200 show statistics --watch
 
 # MAC address table
-sks3200 mac
+sks3200 show mac
 
 # Everything at once
-sks3200 all
+sks3200 show all
 
 # JSON output for scripting
-sks3200 -j status | jq '.temperature'
+sks3200 -j show status | jq '.temperature'
 ```
 
 ## Example output
 
 All commands produce colour-coded, aligned tables with live data.
 
-### `sks3200 status`
+### `sks3200 show status`
 
 ```
 ═══ main (192.168.100.7) ═══
@@ -57,7 +60,7 @@ All commands produce colour-coded, aligned tables with live data.
   DHCP:               Static
 ```
 
-### `sks3200 ports`
+### `sks3200 show ports`
 
 ```
 ═══ main (192.168.100.7) ═══
@@ -77,7 +80,7 @@ All commands produce colour-coded, aligned tables with live data.
  Port 10 Enabled    Link Down            Auto                 Off          N/A
 ```
 
-### `sks3200 statistics`
+### `sks3200 show statistics`
 
 ```
 ═══ main (192.168.100.7) ═══
@@ -99,7 +102,7 @@ All commands produce colour-coded, aligned tables with live data.
 
 Add `--watch` for a live-updating view (refreshes every 2s).
 
-### `sks3200 mac`
+### `sks3200 show mac`
 
 ```
 ═══ main (192.168.100.7) ═══
@@ -117,7 +120,7 @@ Add `--watch` for a live-updating view (refreshes every 2s).
  37  AA:BB:CC:DD:EE:FF      1      0      225   s     ← the switch itself
 ```
 
-### `sks3200 vlan`
+### `sks3200 show vlan`
 
 ```
 ═══ main (192.168.100.7) ═══
@@ -137,7 +140,7 @@ Add `--watch` for a live-updating view (refreshes every 2s).
  Port 10 1        All
 ```
 
-### `sks3200 stp`
+### `sks3200 show stp`
 
 ```
 ═══ main (192.168.100.7) ═══
@@ -157,7 +160,7 @@ Add `--watch` for a live-updating view (refreshes every 2s).
  Port 10 Disabled     No       ─
 ```
 
-### `sks3200 all`
+### `sks3200 show all`
 
 Runs all supported commands in sequence and prints every section — useful for a
 quick full inventory of a switch. Output combines `status`, `ports`,
@@ -194,25 +197,78 @@ Keys: `q` to quit, `Tab` to cycle sections, `+`/`-` to adjust refresh rate
 
 ## Commands
 
+### Read Commands (`show`)
+
 | Command | Description |
-|---|---|---|
-| `status` | System information (temperature, IP, MAC, firmware) |
-| `ports` | Port status and settings |
-| `statistics` | Port traffic statistics (add `--watch` for live refresh) |
-| `mac` | Dynamic MAC address table |
-| `static-mac` | Static MAC address table |
-| `trunk` | Link aggregation / trunk status |
-| `vlan` | VLAN configuration |
-| `stp` | Spanning Tree Protocol status |
-| `loop` | Loop protection status |
-| `igmp` | IGMP snooping configuration |
-| `storm` | Storm control configuration |
-| `mirror` | Port mirror configuration |
-| `network` | Network settings (IP, gateway, DNS) |
-| `all` | Show all information at once |
-| `monitor` | TUI dashboard (live monitoring; requires `tui` feature) |
-| `config-init` | Generate a sample config file template (prints to stdout) |
+|---|---|
+| `show status` | System information (temperature, IP, MAC, firmware) |
+| `show ports` | Port status and settings |
+| `show statistics` | Port traffic statistics (add `--watch` for live refresh) |
+| `show mac` | Dynamic MAC address table |
+| `show static-mac` | Static MAC address table |
+| `show trunk` | Link aggregation / trunk status |
+| `show vlan` | VLAN configuration |
+| `show stp` | Spanning Tree Protocol status |
+| `show loop` | Loop protection status |
+| `show igmp` | IGMP snooping configuration |
+| `show storm` | Storm control configuration |
+| `show mirror` | Port mirror configuration |
+| `show network` | Network settings (IP, gateway, DNS) |
+| `show all` | Show all information at once |
+
+### Write Commands (`set`)
+
+| Command | Description |
+|---|---|
+| `set port` | Configure port (status, speed, flow control) |
+| `set description` | Set device description |
+| `set vlan` | Configure VLAN per-port (PVID, frame type) |
+| `set igmp` | Configure IGMP snooping |
+| `set network` | Update IPv4 network settings |
+| `set storm` | Configure storm control rates |
+| `set stp` | Enable/disable Spanning Tree Protocol |
+| `set mirror` | Configure port mirroring |
+| `set trunk` | Configure trunk/LACP per-port |
+| `set loop-protection` | Configure loop protection |
+
+### Management Commands
+
+| Command | Description |
+|---|---|
+| `clear statistics` | Clear port statistics counters |
+| `clear mac` | Clear dynamic MAC address table |
+| `save` | Save running config to startup |
+| `backup` | Backup configuration to JSON file |
+| `restore` | Restore configuration from backup |
+| `reboot` | Reboot the switch (requires `--yes --apply`) |
+| `factory-reset` | Factory reset (requires `--yes --apply`) |
+| `monitor` | TUI dashboard (live monitoring) |
+| `config-init` | Generate a sample config file template |
 | `help` | Print help for a given subcommand |
+
+## Write Commands — Safety Model
+
+All write commands (`set`, `clear`, `save`, `restore`, `reboot`, `factory-reset`)
+run in **mock mode by default** — they print the request that *would* be sent
+without sending it.
+
+To actually write to the switch, add `--apply`:
+
+```bash
+# Mock (default): shows what would be sent
+sks3200 set port 1 --speed 1000 --flow off
+
+# Actually apply the change
+sks3200 set port 1 --speed 1000 --flow off --apply
+```
+
+Destructive commands (`reboot`, `factory-reset`) additionally require `--yes`
+to confirm:
+
+```bash
+sks3200 reboot --apply --yes
+sks3200 factory-reset --apply --yes
+```
 
 ## Options
 
@@ -280,6 +336,27 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/planetf1/sks32kmon/rele
 - Credentials are transmitted as MD5 hashes (plaintext-equivalent on the wire).
 - Session cookies use `http-only` over plain HTTP.
 - **Do not expose the switch web UI to WAN** — run on a management VLAN.
+
+## Limitations & Known Issues
+
+### Not yet implemented
+
+| Feature | Reason |
+|---|---|
+| **Firmware upgrade** | Requires binary upload (`POST /firmware/upgrade`). Not safe to mock — needs real hardware testing. |
+| **System time config** | The `GET /systemtime_settings.json` response format has not been captured from the switch. |
+| **SNMP proxy** | Planned for future release — requires SNMP agent implementation. |
+
+### Known bugs / quirks
+
+| Issue | Impact | Mitigation |
+|---|---|---|
+| **Trunk config uses hardcoded `_1` suffix** (`write_models.rs:460-469`) | Setting trunk on ports 2–10 may misconfigure port 1 on real hardware. Serde renames are fixed to `portTypeId_1` / `Port_1_grpInd`. | Use the CLI `set trunk` command, not the TUI, for trunk config. Fix requires real hardware testing. |
+| **TUI `config_fields()` makes 8 HTTP requests per render** | Laggy on real switches at the default 3s refresh interval. | Increase the TUI refresh rate with `+` key, or use mock mode for configuration. Fix: cache settings in `SwitchData.refresh()`. |
+| **`set network --dhcp on` couples DHCP and auto-DNS** | Both `dhcpEnabled` and `autoDnsEnabled` are set from the single `--dhcp` flag. Cannot configure DHCP for IP with manual DNS (or vice versa). | Use the switch web UI for split DHCP/DNS config, or a future `--auto-dns` flag. |
+| **TUI Mirror editor only sets monitor port** | Source port mirror configuration (ingress/egress per-port) is not exposed in the TUI. Setting the TUI mirror field clears all source port config on real hardware. | Use `sks3200 set mirror --source-ingress "1,3"` for full mirror config. |
+| **TUI Loop Protection defaults not fetched from switch** | The TUI shows hardcoded defaults ("Off", "10", "2") rather than reading actual switch state. The GET endpoint exists but is not called. | Use `sks3200 set loop-protection` to read before editing. |
+| **`cmd_all` is incomplete** | The `show all` command omits trunk, IGMP, storm, and mirror sections. | Use individual `show` commands for complete output. |
 
 ## Architecture
 

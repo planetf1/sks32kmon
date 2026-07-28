@@ -13,7 +13,7 @@ Two XikeStor (兮克) SKS3200-8E2X switches live on the LAN at `192.168.100.7` a
 API) but no CLI, no SNMP, no SSH, and no modern API surface. Managing them
 requires opening a browser, logging in, and clicking through pages.
 
-We need a Rust-based CLI + TUI tool to query switch state **read-only** (Phase 1),
+We need a Rust-based CLI + TUI tool to query switch state **read-write** (Phase 2),
 with a clear path to write support (Phase 2).
 
 ### Switch Hardware
@@ -41,10 +41,15 @@ sks3200/
 ├── docs/
 │   └── DESIGN.md
 ├── src/
-│   ├── main.rs            # CLI entry point (clap)
-│   ├── client.rs           # HTTP client: auth, session, GET requests
-│   ├── models.rs           # Serde-deserializable API response types
-│   └── tui.rs              # Ratatui TUI dashboard (feature-gated)
+│   ├── main.rs              # CLI entry point (clap)
+│   ├── lib.rs               # Library root, re-exports
+│   ├── api.rs               # HTTP client: auth, session, GET/POST requests
+│   ├── cli.rs               # CLI command definitions and handlers
+│   ├── config.rs            # Config file parsing (TOML)
+│   ├── mock.rs              # Mock mode for write operations (--apply flag)
+│   ├── write_models.rs      # Serde-serializable POST request bodies
+│   ├── models.rs            # Serde-deserializable API response types
+│   └── tui.rs               # Ratatui TUI dashboard (feature-gated)
 ```
 
 ### 2.2 Dependencies
@@ -97,7 +102,7 @@ valid session cookie obtained via `GET /authorize`.
 | `GET /network_settings.json` | `NetworkSettings` | IP, netmask, gateway, DHCP, DNS |
 | `GET /systemtime_settings.json` | `SystemTimeSettings` | System time config |
 
-### 3.2 Write Endpoints (Phase 2, documented for reference)
+### 3.2 Write Endpoints (Phase 2 — implemented)
 
 | Endpoint | Method | Purpose |
 |---|---|---|
@@ -209,11 +214,11 @@ Features:
 
 ## 7. Future Work (Phase 2)
 
-- **Write support:** Port enable/disable, VLAN config, link aggregation setup
-- **Config backup:** Download/upload config files
-- **Firmware upgrade:** Trigger via API
-- **SNMP proxy:** Expose switch metrics via SNMP
-- **Multi-switch aggregate view:** Dashboard across both switches
+- **Write support:** ✅ Done (port settings, VLAN, IGMP, storm, mirror, trunk, loop protection, description, network, STP)
+- **Config backup:** ✅ Done (backup/restore with JSON snapshots)
+- **Firmware upgrade:** ❌ Not yet
+- **SNMP proxy:** ❌ Not yet
+- **Multi-switch aggregate view:** ✅ Done
 
 ---
 

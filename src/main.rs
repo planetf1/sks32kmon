@@ -1,6 +1,9 @@
+mod api;
 mod client;
 mod config;
+mod mock;
 mod models;
+mod write_models;
 
 #[cfg(feature = "cli")]
 mod cli;
