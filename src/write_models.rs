@@ -66,8 +66,7 @@ pub struct PortSettingsRequest {
 
 /// Apply port settings to one or more ports.
 /// **Confidence: likely** (inferred from GET response shape)
-#[derive(Debug, Deserialize, Serialize, Clone)]
-#[derive(Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct PortSettingsApplyRequest {
     #[serde(rename = "PortNum")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -143,7 +142,6 @@ impl PortSettingsApplyRequest {
         Ok(req)
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // Network settings

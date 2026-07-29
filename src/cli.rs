@@ -54,20 +54,16 @@ pub struct Args {
     #[arg(short = 'j', long = "json")]
     pub json: bool,
 
-    /// Suppress informational messages about mock mode
-    #[arg(long = "quiet", short = 'q')]
-    pub quiet: bool,
-
-    /// Actually apply write operations to the switch (affects real switch!)
-    #[arg(long = "apply")]
-    pub apply: bool,
+    /// Preview write operations without applying (mock only, no real changes)
+    #[arg(long = "dry-run")]
+    pub dry_run: bool,
 
     /// Skip confirmation prompts for destructive operations
     #[arg(long = "yes", short = 'y')]
     pub yes: bool,
 
-    /// Force mock mode for all commands (useful for testing)
-    #[arg(long = "mock", hide = true)]
+    /// Force mock mode for all commands (safe sandbox for testing)
+    #[arg(long = "mock")]
     pub mock: bool,
 
     #[command(subcommand)]
@@ -104,10 +100,10 @@ pub enum Command {
         file: String,
     },
 
-    /// Reboot the switch (requires --yes --apply)
+    /// Reboot the switch (requires --yes)
     Reboot,
 
-    /// Factory reset the switch (requires --yes --apply, DESTRUCTIVE!)
+    /// Factory reset the switch (requires --yes, DESTRUCTIVE!)
     FactoryReset,
 
     /// Launch TUI dashboard (live monitoring)
@@ -339,14 +335,16 @@ pub fn run(args: Args) -> Result<()> {
                 if i > 0 {
                     println!();
                 }
-                // Determine client type based on command and flags
-                let use_mock = args.mock || (is_write_command(cmd) && !args.apply);
+                // Client selection: real by default, --mock for sandbox, --dry-run for safe preview
+                let use_mock = args.mock || (args.dry_run && is_write_command(cmd));
 
                 let client = if use_mock {
-                    if is_write_command(cmd) && !args.quiet && !args.apply {
+                    if args.mock {
+                        eprintln!("{} Mock mode — no real switch affected.", "◌".yellow());
+                    } else if args.dry_run {
                         eprintln!(
-                            "{} Running in mock mode (no changes applied). Use --apply to write to the switch.",
-                            "ℹ".yellow()
+                            "{} Dry run — showing what would be sent without applying.",
+                            "◌".yellow()
                         );
                     }
                     ApiClient::connect_mock(&target.host, &target.user, &target.password)?
@@ -1179,7 +1177,7 @@ fn cmd_port_set(
         println!("  {} Port {} settings updated", "✓".green(), port);
         if client.is_mock() {
             println!(
-                "  {} Changes are in mock only. Use --apply to write to real switch.",
+                "  {} Changes are in mock/dry-run mode. Remove --mock/--dry-run to write to real switch.",
                 "ℹ".dimmed()
             );
         }

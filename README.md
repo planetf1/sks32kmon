@@ -264,26 +264,26 @@ arrows to scroll, `Enter` to edit a field in the Config pane.
 
 ## Write Commands — Safety Model
 
-All write commands (`set`, `clear`, `save`, `restore`, `reboot`, `factory-reset`)
-run in **mock mode by default** — they print the request that *would* be sent
-without sending it.
-
-To actually write to the switch, add `--apply`:
+Write commands (`set`, `clear`, `save`, `restore`) apply to the real switch
+by default. Use flags to control behaviour:
 
 ```bash
-# Mock (default): shows what would be sent
+# Real switch (default): applies the change
 sks3200 set port 1 --speed 1000 --flow off
 
-# Actually apply the change
-sks3200 set port 1 --speed 1000 --flow off --apply
+# Dry run: shows what would be sent without applying
+sks3200 set port 1 --speed 1000 --flow off --dry-run
+
+# Mock mode: safe sandbox, no real switch affected
+sks3200 --mock set port 1 --speed 1000 --flow off
 ```
 
-Destructive commands (`reboot`, `factory-reset`) additionally require `--yes`
-to confirm:
+Destructive commands (`reboot`, `factory-reset`, `restore`) require `--yes`
+to confirm on a real switch:
 
 ```bash
-sks3200 reboot --apply --yes
-sks3200 factory-reset --apply --yes
+sks3200 reboot --yes
+sks3200 factory-reset --yes
 ```
 
 ## Options
