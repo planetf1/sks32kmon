@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::io;
 use std::time::{Duration, Instant};
 
@@ -28,6 +29,13 @@ struct SwitchData {
     mac_entries: Option<Vec<MacEntry>>,
     last_refresh: Option<chrono::DateTime<Local>>,
     error: Option<String>,
+    // Pre-computed per-port rates from the last refresh
+    port_rates: Vec<PortRateSnapshot>,
+    // Ring buffers for sparkline history (one per port)
+    port_histories: Vec<PortHistory>,
+    // MAC churn tracking
+    prev_mac_count: Option<usize>,
+    mac_churn: u64,
     // Cached config data (fetched once per refresh, not on every render)
     network_settings: Option<NetworkSettings>,
     port_vlan: Option<PortVlanResponse>,
@@ -58,6 +66,10 @@ impl SwitchData {
             mac_entries: None,
             last_refresh: None,
             error: None,
+            port_rates: vec![PortRateSnapshot::default(); 10],
+            port_histories: (0..10).map(|_| PortHistory::new()).collect(),
+            prev_mac_count: None,
+            mac_churn: 0,
             network_settings: None,
             port_vlan: None,
             stp_config: None,
@@ -92,12 +104,58 @@ impl SwitchData {
 
         match self.client.get_port_statistics() {
             Ok(stats) => {
-                self.prev_port_stats = self.port_stats.take();
-                self.prev_stats_time = if self.prev_port_stats.is_some() {
-                    Some(now)
+                // Compute per-port rates from counter deltas
+                let elapsed = self
+                    .prev_stats_time
+                    .map(|t| now.duration_since(t).as_secs_f64().max(0.1))
+                    .unwrap_or(1.0);
+
+                let prev_ports = self.prev_port_stats.as_ref().map(|p| p.ports());
+
+                if let Some(prev_ports) = prev_ports {
+                    for (i, p) in stats.ports().iter().enumerate() {
+                        let prev = prev_ports.get(i);
+                        let tx: f64 = p.tx_good_pkt.parse().unwrap_or(0.0);
+                        let rx: f64 = p.rx_good_pkt.parse().unwrap_or(0.0);
+                        let tx_bad: f64 = p.tx_bad_pkt.parse().unwrap_or(0.0);
+                        let rx_bad: f64 = p.rx_bad_pkt.parse().unwrap_or(0.0);
+
+                        if let Some(pp) = prev {
+                            let ptx: f64 = pp.tx_good_pkt.parse().unwrap_or(0.0);
+                            let prx: f64 = pp.rx_good_pkt.parse().unwrap_or(0.0);
+                            let ptx_bad: f64 = pp.tx_bad_pkt.parse().unwrap_or(0.0);
+                            let prx_bad: f64 = pp.rx_bad_pkt.parse().unwrap_or(0.0);
+
+                            let tx_rate = ((tx - ptx).max(0.0) / elapsed) as u64;
+                            let rx_rate = ((rx - prx).max(0.0) / elapsed) as u64;
+                            let tx_err = ((tx_bad - ptx_bad).max(0.0) / elapsed) as u64;
+                            let rx_err = ((rx_bad - prx_bad).max(0.0) / elapsed) as u64;
+
+                            self.port_rates[i] = PortRateSnapshot {
+                                tx_rate,
+                                rx_rate,
+                                tx_err_rate: tx_err,
+                                rx_err_rate: rx_err,
+                            };
+
+                            // Push total good + bad rate to sparkline history
+                            self.port_histories[i].push(tx_rate + rx_rate + tx_err + rx_err);
+                        } else {
+                            // New port appeared (shouldn't normally happen)
+                            self.port_rates[i] = PortRateSnapshot::default();
+                            self.port_histories[i].push(0);
+                        }
+                    }
                 } else {
-                    None
-                };
+                    // First refresh — no deltas yet, push zeros
+                    for (i, _p) in stats.ports().iter().enumerate() {
+                        self.port_rates[i] = PortRateSnapshot::default();
+                        self.port_histories[i].push(0);
+                    }
+                }
+
+                self.prev_port_stats = self.port_stats.take();
+                self.prev_stats_time = Some(now);
                 self.port_stats = Some(stats);
             }
             Err(e) => {
@@ -107,7 +165,17 @@ impl SwitchData {
         }
 
         match self.client.get_dynamic_mac_entries() {
-            Ok(entries) => self.mac_entries = Some(entries),
+            Ok(entries) => {
+                // Track MAC churn: absolute change in entry count
+                let new_count = entries.len();
+                if let Some(prev) = self.prev_mac_count {
+                    self.mac_churn = (new_count as i64 - prev as i64).unsigned_abs();
+                } else {
+                    self.mac_churn = 0;
+                }
+                self.prev_mac_count = Some(new_count);
+                self.mac_entries = Some(entries);
+            }
             Err(e) => {
                 self.error = Some(format!("MAC: {}", e));
             }
@@ -123,6 +191,42 @@ impl SwitchData {
         self.trunk_config = self.client.get_trunk_config().ok();
 
         self.last_refresh = Some(chrono::Local::now());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Per-port rate snapshot and history for sparklines
+// ---------------------------------------------------------------------------
+
+/// Maximum number of data points in the ring buffer (~3 min at 3s refresh).
+const HISTORY_MAX: usize = 60;
+
+/// Pre-computed per-port rates (packets/s) from the last refresh delta.
+#[derive(Clone, Default)]
+struct PortRateSnapshot {
+    tx_rate: u64,
+    rx_rate: u64,
+    tx_err_rate: u64,
+    rx_err_rate: u64,
+}
+
+/// Ring buffer tracking one metric per port for sparkline rendering.
+struct PortHistory {
+    ring: VecDeque<u64>,
+}
+
+impl PortHistory {
+    fn new() -> Self {
+        Self {
+            ring: VecDeque::with_capacity(HISTORY_MAX),
+        }
+    }
+
+    fn push(&mut self, value: u64) {
+        if self.ring.len() >= HISTORY_MAX {
+            self.ring.pop_front();
+        }
+        self.ring.push_back(value);
     }
 }
 
@@ -389,9 +493,20 @@ fn render_header(f: &mut Frame, app: &TuiApp, area: Rect) {
 
     let info = match &current.system_info {
         Some(i) => {
+            // Count active ports (link up + enabled)
+            let active_count = current
+                .port_stats
+                .as_ref()
+                .map(|s| {
+                    s.ports()
+                        .iter()
+                        .filter(|p| p.link_status != "Link Down" && p.port_status == "Enabled")
+                        .count()
+                })
+                .unwrap_or(0);
             let title = format!(
-                " SKS3200-8E2X @ {}  |  FW: {}  HW: {}  MAC: {}  {}°C  |  {}",
-                i.sys_ipv4, i.fw_ver, i.hw_ver, i.sys_macaddr, i.temperature, i.des
+                " SKS3200-8E2X @ {}  |  FW: {}  HW: {}  MAC: {}  {}°C  |  {}  |  Up: {}/10",
+                i.sys_ipv4, i.fw_ver, i.hw_ver, i.sys_macaddr, i.temperature, i.des, active_count
             );
             Span::styled(
                 title,
@@ -495,12 +610,43 @@ fn render_port_pane(f: &mut Frame, app: &TuiApp, area: Rect) {
     };
 
     let port_data: Vec<(usize, &PortStats)> = stats.ports().into_iter().enumerate().collect();
-    let max_visible = (area.height as usize).saturating_sub(3);
+
+    // Split area: table on top, sparklines on bottom (if there's room)
+    let sparkline_height = if area.height >= 15 {
+        // Show sparklines for up to 10 ports, but constrained by available space
+        let active_ports = port_data
+            .iter()
+            .filter(|(_, p)| p.link_status != "Link Down" && p.port_status == "Enabled")
+            .count();
+        (active_ports.min(10) as u16).min(area.height.saturating_sub(14))
+    } else {
+        0
+    };
+
+    let (table_area, spark_area) = if sparkline_height > 0 {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(10),
+                Constraint::Length(sparkline_height + 2), // +2 for border
+            ])
+            .split(area);
+        (chunks[0], Some(chunks[1]))
+    } else {
+        (area, None)
+    };
+
+    let max_visible = (table_area.height as usize).saturating_sub(3);
     let scroll = app
         .scroll_offset_port
         .min(port_data.len().saturating_sub(max_visible));
 
-    let header_cells = ["Port", "Status", "Speed", "Tx/s", "Rx/s"].iter().map(|h| {
+    // Expanded header with error rate columns
+    let header_cells = [
+        "Port", "Status", "Speed", "Tx/s", "Rx/s", "TxErr", "RxErr", "Err%",
+    ]
+    .iter()
+    .map(|h| {
         Cell::from(Span::styled(
             *h,
             Style::default().add_modifier(Modifier::BOLD),
@@ -508,6 +654,12 @@ fn render_port_pane(f: &mut Frame, app: &TuiApp, area: Rect) {
     });
     let header =
         Row::new(header_cells).style(Style::default().bg(Color::DarkGray).fg(Color::White));
+
+    // Pre-compute aggregate totals
+    let mut agg_tx: u64 = 0;
+    let mut agg_rx: u64 = 0;
+    let mut agg_tx_err: u64 = 0;
+    let mut agg_rx_err: u64 = 0;
 
     let rows: Vec<Row> = port_data
         .iter()
@@ -537,32 +689,42 @@ fn render_port_pane(f: &mut Frame, app: &TuiApp, area: Rect) {
                 "--"
             };
 
-            // Packet rate computation
-            let (tx_rate, rx_rate) = if let (Some(prev), Some(prev_time)) =
-                (&current.prev_port_stats, &current.prev_stats_time)
-            {
-                let elapsed = prev_time.elapsed().as_secs_f64().max(0.1);
-                let prev_ports = prev.ports();
-                let prev_p = prev_ports.get(*i);
-                match prev_p {
-                    Some(pp) => {
-                        let tx: f64 = p.tx_good_pkt.parse().unwrap_or(0.0);
-                        let ptx: f64 = pp.tx_good_pkt.parse().unwrap_or(0.0);
-                        let rx: f64 = p.rx_good_pkt.parse().unwrap_or(0.0);
-                        let prx: f64 = pp.rx_good_pkt.parse().unwrap_or(0.0);
-                        (
-                            ((tx - ptx).max(0.0) / elapsed) as u64,
-                            ((rx - prx).max(0.0) / elapsed) as u64,
-                        )
-                    }
-                    None => (0, 0),
-                }
+            // Use pre-computed rates from SwitchData
+            let rates = &current.port_rates[*i];
+            let tx_str = format_rate(rates.tx_rate);
+            let rx_str = format_rate(rates.rx_rate);
+            let tx_err_str = format_rate(rates.tx_err_rate);
+            let rx_err_str = format_rate(rates.rx_err_rate);
+
+            // Error ratio: bad / (good + bad) * 100
+            let total_pkts = rates.tx_rate + rates.rx_rate + rates.tx_err_rate + rates.rx_err_rate;
+            let total_errs = rates.tx_err_rate + rates.rx_err_rate;
+            let err_pct = if total_pkts > 0 {
+                (total_errs as f64 / total_pkts as f64) * 100.0
             } else {
-                (0, 0)
+                0.0
+            };
+            let err_str = if err_pct < 0.01 && total_pkts > 0 {
+                "<0.01%".to_string()
+            } else {
+                format!("{:.2}%", err_pct)
             };
 
-            let tx_str = format_rate(tx_rate);
-            let rx_str = format_rate(rx_rate);
+            let err_style = if err_pct > 1.0 {
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+            } else if err_pct > 0.1 {
+                Style::default().fg(Color::Yellow)
+            } else if total_pkts == 0 {
+                Style::default().fg(Color::DarkGray)
+            } else {
+                Style::default().fg(Color::Green)
+            };
+
+            // Accumulate aggregates for the summary row
+            agg_tx += rates.tx_rate;
+            agg_rx += rates.rx_rate;
+            agg_tx_err += rates.tx_err_rate;
+            agg_rx_err += rates.rx_err_rate;
 
             let cells = vec![
                 Cell::from(Span::raw(format!("P{}", port_num))),
@@ -577,6 +739,9 @@ fn render_port_pane(f: &mut Frame, app: &TuiApp, area: Rect) {
                 )),
                 Cell::from(Span::raw(tx_str)),
                 Cell::from(Span::raw(rx_str)),
+                Cell::from(Span::raw(tx_err_str)),
+                Cell::from(Span::raw(rx_err_str)),
+                Cell::from(Span::styled(err_str, err_style)),
             ];
             Row::new(cells)
         })
@@ -584,20 +749,161 @@ fn render_port_pane(f: &mut Frame, app: &TuiApp, area: Rect) {
 
     let widths = [
         Constraint::Length(5),
-        Constraint::Length(9),
-        Constraint::Length(10),
-        Constraint::Length(10),
-        Constraint::Length(10),
+        Constraint::Length(8),
+        Constraint::Length(6),
+        Constraint::Length(8),
+        Constraint::Length(8),
+        Constraint::Length(7),
+        Constraint::Length(7),
+        Constraint::Length(7),
     ];
 
-    let table = Table::new(rows, widths).header(header).block(
+    // Build aggregate totals row
+    let agg_total_pkts = agg_tx + agg_rx + agg_tx_err + agg_rx_err;
+    let agg_total_errs = agg_tx_err + agg_rx_err;
+    let agg_err_pct = if agg_total_pkts > 0 {
+        (agg_total_errs as f64 / agg_total_pkts as f64) * 100.0
+    } else {
+        0.0
+    };
+    let agg_err_str = if agg_err_pct < 0.01 && agg_total_pkts > 0 {
+        "<0.01%".to_string()
+    } else {
+        format!("{:.2}%", agg_err_pct)
+    };
+
+    let agg_row = Row::new(vec![
+        Cell::from(Span::styled(
+            "Σ",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Cell::from(Span::raw("")),
+        Cell::from(Span::raw("")),
+        Cell::from(Span::styled(
+            format_rate(agg_tx),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Cell::from(Span::styled(
+            format_rate(agg_rx),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Cell::from(Span::styled(
+            format_rate(agg_tx_err),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Cell::from(Span::styled(
+            format_rate(agg_rx_err),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Cell::from(Span::styled(
+            agg_err_str,
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+    ])
+    .style(Style::default().bg(Color::DarkGray));
+
+    let mut all_rows = rows;
+    all_rows.push(agg_row);
+
+    let table = Table::new(all_rows, widths).header(header).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(" Ports ")
+            .title(format!(
+                " Ports ({} up) ",
+                port_data
+                    .iter()
+                    .filter(|(_, p)| p.link_status != "Link Down" && p.port_status == "Enabled")
+                    .count()
+            ))
             .border_style(border_style),
     );
 
-    f.render_widget(table, area);
+    f.render_widget(table, table_area);
+
+    // --- Sparkline section ---
+    if let Some(spark_area) = spark_area {
+        render_sparklines(f, app, spark_area);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sparkline section (rendered below the port table)
+// ---------------------------------------------------------------------------
+
+fn render_sparklines(f: &mut Frame, app: &TuiApp, area: Rect) {
+    let current = app.current();
+    let stats = match &current.port_stats {
+        Some(s) => s,
+        None => return,
+    };
+
+    let port_data: Vec<(usize, &PortStats)> = stats.ports().into_iter().enumerate().collect();
+    let active: Vec<(usize, &PortStats)> = port_data
+        .into_iter()
+        .filter(|(_, p)| p.link_status != "Link Down" && p.port_status == "Enabled")
+        .collect();
+
+    if active.is_empty() {
+        return;
+    }
+
+    // Layout: one row per active port
+    let constraints: Vec<Constraint> = (0..active.len()).map(|_| Constraint::Length(1)).collect();
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(area);
+
+    let max_val = current
+        .port_histories
+        .iter()
+        .flat_map(|h| h.ring.iter())
+        .max()
+        .copied()
+        .unwrap_or(1)
+        .max(1);
+
+    for (idx, (port_idx, _p)) in active.iter().enumerate() {
+        if idx >= rows.len() {
+            break;
+        }
+
+        let history = &current.port_histories[*port_idx];
+        let data: Vec<u64> = history.ring.iter().copied().collect();
+
+        if data.is_empty() {
+            continue;
+        }
+
+        let port_num = port_idx + 1;
+        let rates = &current.port_rates[*port_idx];
+        let label = format!(
+            "P{} {:>6}/{:>6}",
+            port_num,
+            format_rate(rates.tx_rate),
+            format_rate(rates.rx_rate)
+        );
+
+        let sparkline = Sparkline::default()
+            .data(&data)
+            .max(max_val)
+            .style(Style::default().fg(Color::Cyan));
+
+        // Render label + sparkline on the same row
+        let label_span = Span::styled(label, Style::default().fg(Color::DarkGray));
+        let label_para = Paragraph::new(Line::from(label_span));
+        f.render_widget(label_para, rows[idx]);
+
+        // Offset sparkline to the right of the label
+        let spark_rect = Rect {
+            x: rows[idx].x + 22,
+            y: rows[idx].y,
+            width: rows[idx].width.saturating_sub(22),
+            height: 1,
+        };
+        f.render_widget(sparkline, spark_rect);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -664,7 +970,11 @@ fn render_mac_pane(f: &mut Frame, app: &TuiApp, area: Rect) {
     let table = Table::new(rows, widths).header(header).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(format!(" MAC Table ({}) ", entries.len()))
+            .title(format!(
+                " MAC Table ({})  churn: {} ",
+                entries.len(),
+                current.mac_churn
+            ))
             .border_style(border_style),
     );
 
@@ -1501,10 +1811,9 @@ fn apply_config_field(app: &mut TuiApp) -> Result<()> {
             3 => {
                 client.save_config()?;
             }
-            4
-                if val.to_lowercase().trim() == "yes" => {
-                    client.factory_reset()?;
-                }
+            4 if val.to_lowercase().trim() == "yes" => {
+                client.factory_reset()?;
+            }
             _ => {}
         }
     }
