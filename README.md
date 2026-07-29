@@ -4,6 +4,9 @@ A Rust CLI + TUI tool for managing **XikeStor (兮克) SKS3200-8E2X** switches
 remotely. These are 8×2.5G + 2×10G SFP+ web-managed switches with a basic
 HTML dashboard — no CLI, no SSH, no SNMP.
 
+**Tested with firmware 2.0.0.3.** Other firmware versions may have different
+API behaviour, especially write endpoints.
+
 **Phase 2: Read-write.** Query system info, port status, traffic statistics,
 MAC tables, VLANs, STP, loop protection, and more — plus configure ports, VLANs,
 IGMP, storm control, mirroring, trunk/LACP, loop protection, STP, network settings,
