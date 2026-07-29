@@ -169,31 +169,44 @@ quick full inventory of a switch. Output combines `status`, `ports`,
 ### TUI dashboard (`sks3200 monitor`)
 
 A ratatui-based real-time dashboard with auto-refresh.
+
 ```
-┌──────────── Status ────────────┬────────── Ports ───────────┐
-│ SKS3200-8E2X v2.0.0.3         │ Port  Speed     Rx       Tx│
-│ MAC: AA:BB:CC:DD:EE:FF        │  1    DOWN      0        0 │
-│ IP:  192.168.100.7            │  2  2.5G  25.2M   80.4M   │
-│ Temp: 52°C                    │  3  100M  737.5K   4.2M   │
-│ DHCP: Static                  │  4   1G    9.9M  143.8M   │
-├─────────── All sections ───────┤  ...                        │
-│ Use Tab to cycle:             │  8  2.5G 221.4M  54.5M    │
-│  • Status                     │  9  DOWN      0        0   │
-│  • Ports                      │ 10  DOWN      0        0   │
-│  • Statistics                 └─────────────────────────────┘
-│  • MAC Table
-│  • STP / VLAN / Network
-│  • Loop / IGMP / Storm        Keys: q=quit, +/-=refresh rate
-└───────────────────────────────┘
+┌─────────── Header ─────────────────────────────────────────────────────┐
+│ SKS3200-8E2X @ 192.168.100.7  FW: 2.0.0.3  HW: A0  52°C  Up: 4/10    │
+├─────────────── Ports (4 up) ────────────┬─────── MAC Table (37) ───────┤
+│ Port Status Speed  Tx/s    Rx/s  TxErr  │ MAC Address         VLAN Port│
+│ P1   Up     2.5G  123.4K  45.6K    0   │ AA:BB:CC:DD:EE:01    1    2 │
+│ P2   Up     1G      890   1.2K    12   │ AA:BB:CC:DD:EE:02    1    8 │
+│ ...                                    │ ...                         │
+│ P8   Up     2.5G   54.5M 221.4M     0   │ AA:BB:CC:DD:EE:FF    1    0 │
+│ Σ            123.4M   46.8M     12     │ churn: 3                     │
+├─── Sparklines ─────────────────────────┴──────────────────────────────┤
+│ P1  123.4K/ 45.6K  ▁▂▃▅▇█▆▄▂▁▁▂▃▄▅▆▇█▇▆▅▄▃▂▁                         │
+│ P2    890/  1.2K   ▁▁▂▃▄▅▆▇█▇▆▅▄▃▂▂▁▁▂▃▄▅▆▇█                         │
+│ P4  143.8M/  9.9M  ▁▂▂▃▃▄▅▅▆▇█▇▆▆▅▄▃▂▁▁▂▂▃▄▅▆▇██                     │
+├──────────────── Footer ────────────────────────────────────────────────┤
+│ [q] Quit  [r] Refresh  [+/-] 3s  [←→] main  Pane: Ports  Last: 08:34 │
+└────────────────────────────────────────────────────────────────────────┘
 ```
+
+The port table now includes **error rate** columns (TxErr/s, RxErr/s) with
+colour-coded **error ratio** (Err%): green <0.1%, yellow 0.1–1%, red >1%.
+The aggregate **Σ row** sums throughput across all ports.
+
+**Sparklines** show 60-point traffic history per active port (bar-chart trend
+over ~3 minutes at the default 3s refresh).
+
+**MAC churn** (title counter) tracks how many entries appeared or disappeared
+between refreshes. The header shows the **active port count** (Up: N/10).
 
 Run it:
 ```bash
 sks3200 -s 192.168.100.7 monitor
 ```
 
-Keys: `q` to quit, `Tab` to cycle sections, `+`/`-` to adjust refresh rate
-(1–60 s), arrows to scroll.
+Keys: `q` to quit, `Tab` to cycle panes (Ports → MAC → Config), `←`/`→` to
+switch between configured switches, `+`/`-` to adjust refresh rate (1–60 s),
+arrows to scroll, `Enter` to edit a field in the Config pane.
 
 ## Commands
 
@@ -352,7 +365,6 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/planetf1/sks32kmon/rele
 | Issue | Impact | Mitigation |
 |---|---|---|
 | **Trunk config uses hardcoded `_1` suffix** (`write_models.rs:460-469`) | Setting trunk on ports 2–10 may misconfigure port 1 on real hardware. Serde renames are fixed to `portTypeId_1` / `Port_1_grpInd`. | Use the CLI `set trunk` command, not the TUI, for trunk config. Fix requires real hardware testing. |
-| **TUI `config_fields()` makes 8 HTTP requests per render** | Laggy on real switches at the default 3s refresh interval. | Increase the TUI refresh rate with `+` key, or use mock mode for configuration. Fix: cache settings in `SwitchData.refresh()`. |
 | **`set network --dhcp on` couples DHCP and auto-DNS** | Both `dhcpEnabled` and `autoDnsEnabled` are set from the single `--dhcp` flag. Cannot configure DHCP for IP with manual DNS (or vice versa). | Use the switch web UI for split DHCP/DNS config, or a future `--auto-dns` flag. |
 | **TUI Mirror editor only sets monitor port** | Source port mirror configuration (ingress/egress per-port) is not exposed in the TUI. Setting the TUI mirror field clears all source port config on real hardware. | Use `sks3200 set mirror --source-ingress "1,3"` for full mirror config. |
 | **TUI Loop Protection defaults not fetched from switch** | The TUI shows hardcoded defaults ("Off", "10", "2") rather than reading actual switch state. The GET endpoint exists but is not called. | Use `sks3200 set loop-protection` to read before editing. |
