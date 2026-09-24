@@ -4,8 +4,25 @@ A Rust CLI + TUI tool for managing **XikeStor (兮克) SKS3200-8E2X** switches
 remotely. These are 8×2.5G + 2×10G SFP+ web-managed switches with a basic
 HTML dashboard — no CLI, no SSH, no SNMP.
 
-**Tested with firmware 2.0.0.3.** Other firmware versions may have different
-API behaviour, especially write endpoints.
+
+**Firmware**
+
+**XikeStor: Tested with firmware 2.0.0.3.** 
+**GoodTop: Tested with firmware 1.0.0.6.**
+Other firmware versions may have different API behaviour, especially write endpoints.
+
+**Also supports V1 firmware** (`fw_ver` starting `1.`), used by the same
+MaxLinear MXL862xx-based hardware under other brand names — confirmed
+working against a **GoodTop ZX310S-8T2XS** on firmware 1.0.0.6. Firmware
+family is auto-detected at connect time; no configuration needed. A few
+features differ by design on V1 firmware and are called out clearly when hit:
+EEE and storm control are switch-global rather than per-port, port mirroring
+only supports one shared port set for both ingress and egress, loop
+detection interval/recovery-time isn't configurable, DNS server isn't
+configurable, and config backup/restore isn't supported yet (V1's native
+format is a proprietary binary blob, not JSON — use the switch's own web UI
+for backup/restore in the meantime). See `V1_API_NOTES.md` for the full
+endpoint-by-endpoint detail.
 
 **Phase 2: Read-write.** Query system info, port status, traffic statistics,
 MAC tables, VLANs, STP, loop protection, and more — plus configure ports, VLANs,

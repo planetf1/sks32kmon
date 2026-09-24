@@ -376,6 +376,7 @@ fn test_igmp_config_roundtrip() {
         igmp: "on".to_string(),
         fast_leave: "off".to_string(),
         report_flood: "on".to_string(),
+        snoop_querier: None,
     };
     let json = serde_json::to_string(&cfg).unwrap();
     let des: IgmpConfig = serde_json::from_str(&json).unwrap();

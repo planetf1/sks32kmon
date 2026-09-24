@@ -362,7 +362,12 @@ impl PortVlanResponse {
 pub struct IgmpConfig {
     pub igmp: String,
     pub fast_leave: String,
+    #[serde(default)]
     pub report_flood: String,
+    /// Only meaningful on V1 (GoodTop) firmware, which has IGMP querier
+    /// snooping instead of V2's report-flood setting. `None` on V2.
+    #[serde(default)]
+    pub snoop_querier: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

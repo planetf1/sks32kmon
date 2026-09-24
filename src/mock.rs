@@ -167,6 +167,7 @@ impl MockSwitchClient {
                 igmp: "on".to_string(),
                 fast_leave: "off".to_string(),
                 report_flood: "off".to_string(),
+                snoop_querier: None,
             },
 
             storm_control: StormControlResponse {
@@ -658,6 +659,7 @@ impl MockSwitchClient {
             igmp: "on".to_string(),
             fast_leave: "off".to_string(),
             report_flood: "off".to_string(),
+            snoop_querier: None,
         };
         state.storm_control.ports.iter_mut().for_each(|p| {
             p.sctrl_bcast = 0;
