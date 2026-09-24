@@ -3,6 +3,7 @@ mod client;
 mod config;
 mod mock;
 mod models;
+mod v1;
 mod write_models;
 
 #[cfg(feature = "cli")]

@@ -6,12 +6,20 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::models::*;
+use crate::v1::{self, FirmwareFamily};
 use crate::write_models::*;
 
-/// A session-authenticated HTTP client for an SKS3200 switch.
+/// A session-authenticated HTTP client for an SKS3200-family switch.
+///
+/// Supports two firmware families, auto-detected at connect time from
+/// `status.json`'s `fw_ver`: V2 (XikeStor SKS3200-8E2X, the tool's original
+/// target) and V1 (GoodTop ZX310S-8T2XS and similar — same hardware family,
+/// different/earlier firmware and web API). See `src/v1.rs` for the V1 wire
+/// format and conversions.
 pub struct SwitchClient {
     base_url: String,
     http: HttpClient,
+    family: FirmwareFamily,
 }
 
 impl SwitchClient {
@@ -30,7 +38,11 @@ impl SwitchClient {
             .build()
             .context("Failed to build HTTP client")?;
 
-        let client = Self { base_url, http };
+        let mut client = Self {
+            base_url,
+            http,
+            family: FirmwareFamily::V2,
+        };
 
         // Compute MD5 hashes
         let usr_hash = md5_hash(username);
@@ -54,6 +66,11 @@ impl SwitchClient {
             bail!("Authentication failed for {} — check credentials", host);
         }
 
+        // Firmware family detection: status.json's shape is identical between
+        // V1 and V2, so this always succeeds regardless of family.
+        let info: SystemInfo = client.get_json("status.json")?;
+        client.family = FirmwareFamily::detect(&info.fw_ver);
+
         Ok(client)
     }
 
@@ -66,69 +83,147 @@ impl SwitchClient {
 
     /// Network Settings — `GET /network_settings.json`
     pub fn get_network_settings(&self) -> Result<NetworkSettings> {
-        self.get_json("network_settings.json")
+        match self.family {
+            FirmwareFamily::V2 => self.get_json("network_settings.json"),
+            FirmwareFamily::V1 => {
+                let raw = self.get_json_value("network_settings.json")?;
+                v1::parse_network_settings(&raw)
+            }
+        }
     }
 
     /// Port Settings — `GET /port_setting_load.json`
     pub fn get_port_settings(&self) -> Result<PortSettingsResponse> {
-        self.get_json("port_setting_load.json")
+        match self.family {
+            FirmwareFamily::V2 => self.get_json("port_setting_load.json"),
+            FirmwareFamily::V1 => {
+                let raw = self.get_json_value("port_setting_load.json")?;
+                v1::parse_port_settings(&raw)
+            }
+        }
     }
 
     /// Port Statistics — `GET /port_statistics.json`
     pub fn get_port_statistics(&self) -> Result<PortStatisticsResponse> {
-        self.get_json("port_statistics.json")
+        match self.family {
+            FirmwareFamily::V2 => self.get_json("port_statistics.json"),
+            FirmwareFamily::V1 => {
+                let raw = self.get_json_value("port_statistics.json")?;
+                v1::parse_port_statistics(&raw)
+            }
+        }
     }
 
     /// Dynamic MAC Table — `GET /mac_get_dynamic_mac_entries.json`
     ///
-    /// Note: The API returns `data: [{...}, {...}]` lines (JSON with `data:` prefix).
+    /// V2's API returns `data: [{...}, {...}]` lines (JSON with `data:`
+    /// prefix); V1 returns a `{total_entries, Idx_0..Idx_N}` object.
     pub fn get_dynamic_mac_entries(&self) -> Result<Vec<MacEntry>> {
-        let raw = self.get_raw("mac_get_dynamic_mac_entries.json")?;
-        parse_mac_entries(&raw)
+        match self.family {
+            FirmwareFamily::V2 => {
+                let raw = self.get_raw("mac_get_dynamic_mac_entries.json")?;
+                parse_mac_entries(&raw)
+            }
+            FirmwareFamily::V1 => {
+                let raw = self.get_json_value("mac_get_dynamic_mac_entries.json")?;
+                v1::parse_dynamic_mac_entries(&raw)
+            }
+        }
     }
 
     /// Static MAC Table — `GET /mac_get_static_mac_entries.json`
     pub fn get_static_mac_entries(&self) -> Result<Vec<StaticMacEntry>> {
-        let raw = self.get_raw("mac_get_static_mac_entries.json")?;
-        parse_static_mac_entries(&raw)
+        match self.family {
+            FirmwareFamily::V2 => {
+                let raw = self.get_raw("mac_get_static_mac_entries.json")?;
+                parse_static_mac_entries(&raw)
+            }
+            FirmwareFamily::V1 => {
+                let raw = self.get_json_value("mac_get_static_mac_entries.json")?;
+                v1::parse_static_mac_entries(&raw)
+            }
+        }
     }
 
     /// Loop Detection Status — `GET /port_loop_status.json`
     pub fn get_loop_status(&self) -> Result<LoopStatusResponse> {
-        self.get_json("port_loop_status.json")
+        match self.family {
+            FirmwareFamily::V2 => self.get_json("port_loop_status.json"),
+            FirmwareFamily::V1 => {
+                let raw = self.get_json_value("port_loop_status.json")?;
+                v1::parse_loop_status(&raw)
+            }
+        }
     }
 
     /// STP Config — `GET /stp.json`
     pub fn get_stp_config(&self) -> Result<StpConfig> {
-        self.get_json("stp.json")
+        match self.family {
+            FirmwareFamily::V2 => self.get_json("stp.json"),
+            FirmwareFamily::V1 => {
+                let raw = self.get_json_value("stp.json")?;
+                v1::parse_stp_config(&raw)
+            }
+        }
     }
 
-    /// Port VLAN Config — `GET /port_vlan.json`
+    /// Port VLAN Config — `GET /port_vlan.json` (V2) or `GET /port_vlan_cfg.json` (V1)
     pub fn get_port_vlan(&self) -> Result<PortVlanResponse> {
-        self.get_json("port_vlan.json")
+        match self.family {
+            FirmwareFamily::V2 => self.get_json("port_vlan.json"),
+            FirmwareFamily::V1 => {
+                let raw = self.get_json_value("port_vlan_cfg.json")?;
+                v1::parse_port_vlan(&raw)
+            }
+        }
     }
 
-    /// All Port PVIDs — `GET /all_port_pvid.json`
+    /// All Port PVIDs — `GET /all_port_pvid.json` (V2 only; no V1 equivalent found)
     pub fn get_all_port_pvids(&self) -> Result<PortPvidsResponse> {
         self.get_json("all_port_pvid.json")
     }
 
     /// IGMP Config — `GET /igmp_config.json`
     pub fn get_igmp_config(&self) -> Result<IgmpConfig> {
-        self.get_json("igmp_config.json")
+        match self.family {
+            FirmwareFamily::V2 => self.get_json("igmp_config.json"),
+            FirmwareFamily::V1 => {
+                let raw = self.get_json_value("igmp_config.json")?;
+                v1::parse_igmp_config(&raw)
+            }
+        }
     }
 
     /// Storm Control Config — `GET /storm_ctrl_cfg.json`
+    ///
+    /// On V1 firmware this is switch-global (one rate for the whole switch,
+    /// not per-port/per-traffic-type); see `v1::parse_storm_control`.
     pub fn get_storm_control(&self) -> Result<StormControlResponse> {
-        self.get_json("storm_ctrl_cfg.json")
+        match self.family {
+            FirmwareFamily::V2 => self.get_json("storm_ctrl_cfg.json"),
+            FirmwareFamily::V1 => {
+                let raw = self.get_json_value("storm_ctrl_cfg.json")?;
+                v1::parse_storm_control(&raw)
+            }
+        }
     }
 
     /// Port Mirror Config — `GET /port_mirror.json`
     pub fn get_port_mirror(&self) -> Result<PortMirrorResponse> {
-        self.get_json("port_mirror.json")
+        match self.family {
+            FirmwareFamily::V2 => self.get_json("port_mirror.json"),
+            FirmwareFamily::V1 => {
+                let raw = self.get_json_value("port_mirror.json")?;
+                v1::parse_port_mirror(&raw)
+            }
+        }
     }
 
     /// Link Aggregation Config — `GET /port_trunk_cfg.json`
+    ///
+    /// V1's response shape matches `TrunkConfigResponse` field-for-field
+    /// already (flattened raw catches the rest), so no V1-specific parsing
+    /// is needed for reads — only writes differ.
     pub fn get_trunk_config(&self) -> Result<TrunkConfigResponse> {
         self.get_json("port_trunk_cfg.json")
     }
@@ -136,78 +231,209 @@ impl SwitchClient {
     // -- Write API calls ----------------------------------------------------
 
     /// Set device description — `POST /set_des.json`
-    /// **Confidence: certain** (captured from web UI)
+    /// **Confidence: certain** (captured from web UI, live-tested on V1)
     pub fn set_description(&self, description: &str) -> Result<WriteResponse> {
-        let body = serde_json::json!({"des": description});
+        let body = match self.family {
+            FirmwareFamily::V2 => serde_json::json!({"des": description}),
+            FirmwareFamily::V1 => v1::set_description_body(description),
+        };
         self.post_json("set_des.json", &body)
     }
 
     /// Apply port settings — `POST /apply_user_port_setting.json`
-    /// **Confidence: likely** (inferred from GET response shape)
+    /// **Confidence: likely on V2** (inferred from GET response shape);
+    /// **certain on V1** (captured from web UI JS).
     pub fn set_port_settings(&self, request: &PortSettingsApplyRequest) -> Result<WriteResponse> {
-        let body = serde_json::to_value(request)?;
-        self.post_json("apply_user_port_setting.json", &body)
+        match self.family {
+            FirmwareFamily::V2 => {
+                let body = serde_json::to_value(request)?;
+                self.post_json("apply_user_port_setting.json", &body)
+            }
+            FirmwareFamily::V1 => {
+                let current = self.get_port_settings()?;
+                let body = v1::build_port_settings_apply_body(&current, request)?;
+                self.post_json("apply_user_port_setting.json", &body)
+            }
+        }
     }
 
     /// Update IPv4 network settings — `POST /network_settings_ipv4.json`
-    /// **Confidence: likely** (inferred from GET response)
+    /// **Confidence: likely on V2** (inferred from GET response);
+    /// **certain on V1** (captured from web UI JS). V1 does not expose DNS
+    /// server configuration through this endpoint at all.
     pub fn set_network_settings(&self, request: &NetworkSettingsRequest) -> Result<WriteResponse> {
-        let body = serde_json::to_value(request)?;
-        self.post_json("network_settings_ipv4.json", &body)
+        match self.family {
+            FirmwareFamily::V2 => {
+                let body = serde_json::to_value(request)?;
+                self.post_json("network_settings_ipv4.json", &body)
+            }
+            FirmwareFamily::V1 => {
+                let current = self.get_network_settings()?;
+                let body = v1::build_network_settings_body(&current, request)?;
+                self.post_json_custom_success(
+                    "network_settings_ipv4.json",
+                    &body,
+                    v1::network_settings_response_is_success,
+                )
+            }
+        }
     }
 
-    /// Set per-port VLAN config — `POST /port_vlan.json`
-    /// **Confidence: speculative**
+    /// Set per-port VLAN config — `POST /port_vlan.json` (V2) or
+    /// `POST /port_vlan_cfg.json` (V1).
+    /// **Confidence: speculative on both** — best-effort mapping of V1's
+    /// bridge-port enable/tag/untag flags onto V2's PVID+FrameType model.
+    /// V1's write replaces the whole 10-port table in one POST; untouched
+    /// ports are carried forward from the switch's *raw* current response
+    /// (not decoded through the canonical model — see `v1::build_port_vlan_body`
+    /// for why: an earlier version reconstructed them lossily and took the
+    /// test switch off the network entirely).
     pub fn set_port_vlan(&self, request: &PortVlanRequest) -> Result<WriteResponse> {
-        let body = serde_json::to_value(request)?;
-        self.post_json("port_vlan.json", &body)
+        match self.family {
+            FirmwareFamily::V2 => {
+                let body = serde_json::to_value(request)?;
+                self.post_json("port_vlan.json", &body)
+            }
+            FirmwareFamily::V1 => {
+                let current = self.get_json_value("port_vlan_cfg.json")?;
+                let body = v1::build_port_vlan_body(&current, request)?;
+                let resp = self.post_json("port_vlan_cfg.json", &body)?;
+                if resp.is_success() {
+                    self.post_json("save_port_vlan_map.json", &serde_json::json!({}))?;
+                }
+                Ok(resp)
+            }
+        }
     }
 
     /// Update IGMP snooping config — `POST /igmp_config.json`
-    /// **Confidence: speculative**
+    /// **Confidence: speculative on V2**; **likely on V1** (captured from
+    /// web UI JS, but the checkbox-omission convention is unconfirmed on
+    /// real hardware).
     pub fn set_igmp_config(&self, request: &IgmpConfigRequest) -> Result<WriteResponse> {
-        let body = serde_json::to_value(request)?;
-        self.post_json("igmp_config.json", &body)
+        match self.family {
+            FirmwareFamily::V2 => {
+                let body = serde_json::to_value(request)?;
+                self.post_json("igmp_config.json", &body)
+            }
+            FirmwareFamily::V1 => {
+                let current = self.get_igmp_config()?;
+                let body = v1::build_igmp_config_body(&current, request);
+                self.post_json("igmp_config.json", &body)
+            }
+        }
     }
 
     /// Set storm control rates — `POST /storm_ctrl_cfg.json`
-    /// **Confidence: speculative**
+    /// **Confidence: speculative on V2.** Not supported on V1: that
+    /// firmware's storm control is a single switch-wide rate, not
+    /// per-port/per-traffic-type, so this tool's per-port request shape has
+    /// no faithful translation.
     pub fn set_storm_control(&self, request: &StormControlRequest) -> Result<WriteResponse> {
-        let body = serde_json::to_value(request)?;
-        self.post_json("storm_ctrl_cfg.json", &body)
+        match self.family {
+            FirmwareFamily::V2 => {
+                let body = serde_json::to_value(request)?;
+                self.post_json("storm_ctrl_cfg.json", &body)
+            }
+            FirmwareFamily::V1 => bail!(
+                "This switch's firmware (V1/GoodTop) only supports a single \
+                 switch-wide storm control rate, not independent per-port \
+                 broadcast/multicast/unicast rates. Not supported by this tool."
+            ),
+        }
     }
 
     /// Configure port mirroring — `POST /port_mirror.json`
-    /// **Confidence: speculative**
+    /// **Confidence: speculative on V2**; **likely on V1** (captured from
+    /// web UI JS). V1 only supports the same port set for ingress and
+    /// egress — see `v1::build_port_mirror_body`.
     pub fn set_port_mirror(&self, request: &PortMirrorRequest) -> Result<WriteResponse> {
-        let body = serde_json::to_value(request)?;
-        self.post_json("port_mirror.json", &body)
+        match self.family {
+            FirmwareFamily::V2 => {
+                let body = serde_json::to_value(request)?;
+                self.post_json("port_mirror.json", &body)
+            }
+            FirmwareFamily::V1 => {
+                let body = v1::build_port_mirror_body(request)?;
+                self.post_json("port_mirror.json", &body)
+            }
+        }
     }
 
     /// Update STP configuration — `POST /stp.json`
-    /// **Confidence: speculative**
+    /// **Confidence: speculative on V2**; **likely on V1** for the
+    /// enable/disable toggle this tool actually exposes (captured from web
+    /// UI JS). Per-port edge-port flags are never touched by this tool on
+    /// either firmware family.
     pub fn set_stp_config(&self, request: &StpConfigRequest) -> Result<WriteResponse> {
-        let body = serde_json::to_value(request)?;
-        self.post_json("stp.json", &body)
+        match self.family {
+            FirmwareFamily::V2 => {
+                let body = serde_json::to_value(request)?;
+                self.post_json("stp.json", &body)
+            }
+            FirmwareFamily::V1 => {
+                let current = self.get_stp_config()?;
+                let body = v1::build_stp_config_body(&current.stp_rstp_mode, request);
+                self.post_json("stp.json", &body)
+            }
+        }
     }
 
     /// Set trunk/LACP config — `POST /port_trunk_cfg.json`
-    /// **Confidence: speculative**
+    /// **Confidence: speculative on both** — the firmware's own JS is
+    /// internally inconsistent about port-index mapping for this endpoint's
+    /// Link Up/Down display; the write path (what this sends) is
+    /// consistently mapped. See `v1::build_trunk_config_body`.
     pub fn set_trunk_config(&self, request: &TrunkConfigRequest) -> Result<WriteResponse> {
-        let body = serde_json::to_value(request)?;
-        self.post_json("port_trunk_cfg.json", &body)
+        match self.family {
+            FirmwareFamily::V2 => {
+                let body = serde_json::to_value(request)?;
+                self.post_json("port_trunk_cfg.json", &body)
+            }
+            FirmwareFamily::V1 => {
+                let current = self.get_json_value("port_trunk_cfg.json")?;
+                let body = v1::build_trunk_config_body(&current, request)?;
+                self.post_json("port_trunk_cfg.json", &body)
+            }
+        }
     }
 
     /// Configure loop protection — `POST /port_lock_cfg.json`
+    /// Not supported on V1: that firmware's `port_lock_cfg.json` is
+    /// per-port security locking, not the detection-interval/recovery-time
+    /// loop protection this tool's request models — despite the confusingly
+    /// similar name and the firmware UI's own "loop detection" page title.
     pub fn set_loop_protection(&self, request: &LoopProtectionRequest) -> Result<WriteResponse> {
-        let body = serde_json::to_value(request)?;
-        self.post_json("port_lock_cfg.json", &body)
+        match self.family {
+            FirmwareFamily::V2 => {
+                let body = serde_json::to_value(request)?;
+                self.post_json("port_lock_cfg.json", &body)
+            }
+            FirmwareFamily::V1 => bail!(
+                "This switch's firmware (V1/GoodTop) does not expose loop \
+                 detection interval/recovery-time configuration — its \
+                 port_lock_cfg endpoint is per-port security locking, a \
+                 different feature. Not supported by this tool."
+            ),
+        }
     }
 
-    /// Save running config to startup — `POST /save_all_configs.json`
+    /// Save running config to startup.
+    /// V2: `POST /save_all_configs.json`. V1 has no single "save everything"
+    /// endpoint — only port settings and VLAN config have a separate
+    /// apply-then-save step (other V1 settings persist immediately on
+    /// their `set_*` POST), so this saves both of those.
     pub fn save_config(&self) -> Result<WriteResponse> {
-        let body = serde_json::json!({});
-        self.post_json("save_all_configs.json", &body)
+        match self.family {
+            FirmwareFamily::V2 => {
+                let body = serde_json::json!({});
+                self.post_json("save_all_configs.json", &body)
+            }
+            FirmwareFamily::V1 => {
+                self.post_json("save_user_port_setting.json", &serde_json::json!({}))?;
+                self.post_json("save_port_vlan_map.json", &serde_json::json!({}))
+            }
+        }
     }
 
     /// Clear port statistics — `GET /clear_statistics.json`
@@ -261,7 +487,20 @@ impl SwitchClient {
     }
 
     /// Download config backup — reads all endpoints and serializes to JSON.
+    ///
+    /// Not supported on V1: that firmware's native config backup
+    /// (`/config/download`) is a custom binary key=value blob, not JSON, and
+    /// wasn't reverse-engineered here — use the switch's own web UI for
+    /// backup/restore on V1 firmware for now.
     pub fn backup_config(&self) -> Result<String> {
+        if self.family == FirmwareFamily::V1 {
+            bail!(
+                "Backup/restore isn't supported on this switch's firmware \
+                 (V1/GoodTop) yet — its native config format is a custom \
+                 binary blob, not JSON. Use the switch's own web UI \
+                 (System > Backup/Restore) instead."
+            );
+        }
         let snapshot = SwitchConfigSnapshot {
             metadata: ConfigMetadata {
                 tool_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -291,6 +530,14 @@ impl SwitchClient {
     /// On real switches: network settings are applied but may cause a disconnect
     /// before the response arrives. The caller should handle this.
     pub fn restore_config(&self, config_json: &str) -> Result<WriteResponse> {
+        if self.family == FirmwareFamily::V1 {
+            bail!(
+                "Backup/restore isn't supported on this switch's firmware \
+                 (V1/GoodTop) yet — its native config format is a custom \
+                 binary blob, not JSON. Use the switch's own web UI \
+                 (System > Backup/Restore) instead."
+            );
+        }
         let snapshot: SwitchConfigSnapshot =
             serde_json::from_str(config_json).context("Failed to parse config snapshot")?;
 
@@ -363,6 +610,13 @@ impl SwitchClient {
 
     fn url(&self, endpoint: &str) -> String {
         format!("{}/{}", self.base_url, endpoint)
+    }
+
+    /// Fetch an endpoint and deserialize as a generic JSON value (used for
+    /// V1 endpoints whose shape requires manual, port-remapped extraction
+    /// rather than a direct `#[derive(Deserialize)]`).
+    fn get_json_value(&self, endpoint: &str) -> Result<serde_json::Value> {
+        self.get_json(endpoint)
     }
 
     /// Fetch an endpoint and deserialize as JSON.
@@ -450,6 +704,47 @@ impl SwitchClient {
 
         serde_json::from_str(&response_body)
             .with_context(|| format!("Failed to parse JSON from {}", endpoint))
+    }
+
+    /// Like `post_json`, but for endpoints with a non-standard success
+    /// convention (e.g. V1's `network_settings_ipv4.json`, which returns
+    /// `{"alert_msg":"Success"}` instead of an empty body).
+    fn post_json_custom_success<T: serde::Serialize>(
+        &self,
+        endpoint: &str,
+        body: &T,
+        is_success: impl Fn(&str) -> bool,
+    ) -> Result<WriteResponse> {
+        let url = self.url(endpoint);
+        let resp = self
+            .http
+            .post(&url)
+            .json(body)
+            .send()
+            .with_context(|| format!("POST {} failed", endpoint))?;
+
+        if !resp.status().is_success() {
+            bail!("POST {} returned HTTP {}", endpoint, resp.status());
+        }
+
+        let response_body = resp
+            .text()
+            .with_context(|| format!("Read {} response failed", endpoint))?;
+
+        if response_body.contains("login.html") {
+            bail!("Session expired — please reconnect");
+        }
+
+        Ok(WriteResponse {
+            result: Some(
+                if is_success(&response_body) {
+                    "success"
+                } else {
+                    "failure"
+                }
+                .to_string(),
+            ),
+        })
     }
 }
 
