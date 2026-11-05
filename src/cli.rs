@@ -660,6 +660,11 @@ fn cmd_statistics(
     // Default and floor chosen to be gentle on the embedded switch web server:
     // 2s polling of port statistics has caused it to freeze on real hardware.
     let poll_interval = interval.unwrap_or(5).max(3);
+    if let Some(i) = interval {
+        if i < 3 {
+            eprintln!("Warning: interval clamped to 3s to prevent switch web server freeze.");
+        }
+    }
     let mut prev_stats: Option<crate::models::PortStatisticsResponse> = None;
     let mut prev_time: Option<std::time::Instant> = None;
 

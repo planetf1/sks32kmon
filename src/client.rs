@@ -52,7 +52,7 @@ impl SwitchClient {
             .pool_max_idle_per_host(1)
             // Stay idle across refresh ticks (TUI interval is clamped to
             // 3-60s; CLI watch defaults to 5s) instead of closing between polls.
-            .pool_idle_timeout(Duration::from_secs(60))
+            .pool_idle_timeout(Duration::from_secs(90))
             .tcp_keepalive(Some(Duration::from_secs(15)))
             .timeout(Duration::from_secs(10))
             .build()

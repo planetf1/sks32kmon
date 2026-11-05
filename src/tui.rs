@@ -157,7 +157,7 @@ impl SwitchData {
                         self.port_histories.resize_with(num_ports, PortHistory::new);
                     }
 
-                    let prev_ports = self.prev_port_stats.as_ref().map(|p| p.ports());
+                    let prev_ports = self.port_stats.as_ref().map(|p| p.ports());
 
                     if let Some(prev_ports) = prev_ports {
                         for (i, p) in stats.ports().iter().enumerate() {
@@ -215,7 +215,6 @@ impl SwitchData {
             //    but no more often than MAC_REFRESH_INTERVAL (heavy ASIC dump on the switch)
             if active_pane == 0 || active_pane == 1 || force_full {
                 let mac_due = force_full
-                    || self.mac_entries.is_none()
                     || self
                         .last_mac_refresh
                         .map(|t| now.duration_since(t) >= MAC_REFRESH_INTERVAL)
@@ -2280,7 +2279,7 @@ mod tests {
             .and_then(|t| t.checked_sub(MAC_REFRESH_INTERVAL + Duration::from_secs(1)));
         assert!(sd.last_mac_refresh.is_some());
         sd.refresh(1, false);
-        assert_ne!(sd.last_mac_refresh, after_full);
+        assert!(sd.last_mac_refresh.unwrap() > after_full.unwrap());
     }
 
     #[test]
