@@ -255,17 +255,52 @@ impl SwitchData {
                         .unwrap_or(true);
 
                 if need_config {
-                    self.network_settings = self.client.get_network_settings().ok();
-                    self.port_vlan = self.client.get_port_vlan().ok();
-                    self.stp_config = self.client.get_stp_config().ok();
-                    self.igmp_config = self.client.get_igmp_config().ok();
-                    self.storm_control = self.client.get_storm_control().ok();
-                    self.port_mirror = self.client.get_port_mirror().ok();
-                    self.trunk_config = self.client.get_trunk_config().ok();
+                    // Keep the last good data on failure and surface the error,
+                    // rather than silently blanking the pane.
+                    let mut cfg_err: Option<String> = None;
+                    macro_rules! fetch_cfg {
+                        ($field:ident, $call:expr, $name:literal) => {
+                            match $call {
+                                Ok(v) => {
+                                    self.$field = Some(v);
+                                    any_ok = true;
+                                }
+                                Err(e) => {
+                                    cfg_err.get_or_insert_with(|| format!("{}: {}", $name, e));
+                                }
+                            }
+                        };
+                    }
+                    fetch_cfg!(
+                        network_settings,
+                        self.client.get_network_settings(),
+                        "Network"
+                    );
+                    fetch_cfg!(port_vlan, self.client.get_port_vlan(), "VLAN");
+                    fetch_cfg!(stp_config, self.client.get_stp_config(), "STP");
+                    fetch_cfg!(igmp_config, self.client.get_igmp_config(), "IGMP");
+                    fetch_cfg!(
+                        storm_control,
+                        self.client.get_storm_control(),
+                        "Storm control"
+                    );
+                    fetch_cfg!(port_mirror, self.client.get_port_mirror(), "Port mirror");
+                    fetch_cfg!(trunk_config, self.client.get_trunk_config(), "Trunk");
+                    if let Some(e) = cfg_err {
+                        if self.error.is_none() {
+                            self.error = Some(format!("Config: {}", e));
+                        }
+                    }
                     self.last_config_refresh = Some(now);
                 }
             }
         } // !probe_only
+
+        // Recovering from an outage: don't hit the switch with the heavy MAC
+        // dump on the very next tick; wait a full cadence interval first.
+        if probe_only && any_ok {
+            self.last_mac_refresh = Some(now);
+        }
 
         self.consecutive_failed_refreshes = if any_ok {
             0
@@ -505,12 +540,20 @@ pub fn run_tui(targets: &[SwitchTarget], mock: bool, initial_interval: Option<u6
     app.refresh_all();
     let mut last_tick = Instant::now();
 
+    // Only redraw when something changed (input, resize, or a refresh); an
+    // unconditional 5 Hz repaint wastes CPU, notably over SSH.
+    let mut dirty = true;
+
     loop {
-        terminal.draw(|f| draw_ui(f, &app))?;
+        if dirty {
+            terminal.draw(|f| draw_ui(f, &app))?;
+            dirty = false;
+        }
 
         // Poll for input with a short timeout for responsive key handling
         let poll_timeout = Duration::from_millis(200);
         if event::poll(poll_timeout)? {
+            dirty = true;
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
                     // Edit mode input handling (field editing in Config pane)
@@ -651,6 +694,7 @@ pub fn run_tui(targets: &[SwitchTarget], mock: bool, initial_interval: Option<u6
         if last_tick.elapsed() >= Duration::from_secs(app.refresh_interval) {
             app.refresh_current();
             last_tick = Instant::now();
+            dirty = true;
         }
     }
 
@@ -2292,9 +2336,28 @@ mod tests {
         assert!(sd.mac_entries.is_none());
         assert!(sd.system_info.is_some());
 
-        // Next tick is a full refresh again
+        // Recovery re-arms the MAC cadence: the heavy dump is not fired on
+        // the very first full tick after an outage.
+        assert!(sd.last_mac_refresh.is_some());
+        sd.refresh(0, false);
+        assert!(sd.port_stats.is_some());
+        assert!(sd.mac_entries.is_none());
+
+        // Once the cadence window elapses, the MAC table is fetched again
+        sd.last_mac_refresh = sd
+            .last_mac_refresh
+            .and_then(|t| t.checked_sub(MAC_REFRESH_INTERVAL + Duration::from_secs(1)));
         sd.refresh(0, false);
         assert!(sd.mac_entries.is_some());
-        assert!(sd.port_stats.is_some());
+    }
+
+    #[test]
+    fn config_pane_populates_and_counts_as_success() {
+        let mut sd = mock_switch_data();
+        sd.refresh(2, true);
+        assert!(sd.network_settings.is_some());
+        assert!(sd.trunk_config.is_some());
+        assert!(sd.last_config_refresh.is_some());
+        assert_eq!(sd.consecutive_failed_refreshes, 0);
     }
 }
