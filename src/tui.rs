@@ -111,7 +111,6 @@ impl SwitchData {
                 Err(e) => {
                     if self.system_info.is_none() {
                         self.error = Some(format!("Status: {}", e));
-                        return;
                     }
                 }
             }
@@ -460,12 +459,14 @@ pub fn run_tui(targets: &[SwitchTarget], mock: bool, initial_interval: Option<u6
     };
 
     app.refresh_all();
+    let mut last_tick = Instant::now();
 
     loop {
         terminal.draw(|f| draw_ui(f, &app))?;
 
-        // Poll for input at the current refresh interval
-        if event::poll(Duration::from_secs(app.refresh_interval))? {
+        // Poll for input with a short timeout for responsive key handling
+        let poll_timeout = Duration::from_millis(200);
+        if event::poll(poll_timeout)? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
                     // Edit mode input handling (field editing in Config pane)
@@ -483,6 +484,7 @@ pub fn run_tui(targets: &[SwitchTarget], mock: bool, initial_interval: Option<u6
                                 app.editing = false;
                                 app.edit_buffer.clear();
                                 app.refresh_all();
+                                last_tick = Instant::now();
                             }
                             KeyCode::Backspace => {
                                 app.edit_buffer.pop();
@@ -500,6 +502,7 @@ pub fn run_tui(targets: &[SwitchTarget], mock: bool, initial_interval: Option<u6
                         KeyCode::Esc => break,
                         KeyCode::Char('r') | KeyCode::Char('R') => {
                             app.refresh_all();
+                            last_tick = Instant::now();
                         }
                         KeyCode::Char('t') | KeyCode::Char('T') => {
                             app.theme.toggle();
@@ -510,6 +513,7 @@ pub fn run_tui(targets: &[SwitchTarget], mock: bool, initial_interval: Option<u6
                             app.scroll_offset_mac = 0;
                             app.config_cursor = 0;
                             app.config_scroll = 0;
+                            app.refresh_current();
                         }
                         KeyCode::Right => {
                             if app.switches.len() > 1 {
@@ -519,6 +523,7 @@ pub fn run_tui(targets: &[SwitchTarget], mock: bool, initial_interval: Option<u6
                             app.scroll_offset_mac = 0;
                             app.config_cursor = 0;
                             app.config_scroll = 0;
+                            app.refresh_current();
                         }
                         KeyCode::Left => {
                             app.current_switch = if app.current_switch == 0 {
@@ -528,6 +533,9 @@ pub fn run_tui(targets: &[SwitchTarget], mock: bool, initial_interval: Option<u6
                             };
                             app.scroll_offset_port = 0;
                             app.scroll_offset_mac = 0;
+                            app.config_cursor = 0;
+                            app.config_scroll = 0;
+                            app.refresh_current();
                         }
                         // Config pane navigation
                         KeyCode::Up if app.active_pane == 2 && app.config_cursor > 0 => {
@@ -594,9 +602,11 @@ pub fn run_tui(targets: &[SwitchTarget], mock: bool, initial_interval: Option<u6
                     }
                 }
             }
-        } else {
-            // Timeout — auto-refresh current switch
+        }
+
+        if last_tick.elapsed() >= Duration::from_secs(app.refresh_interval) {
             app.refresh_current();
+            last_tick = Instant::now();
         }
     }
 
@@ -1245,10 +1255,10 @@ fn render_mac_pane(f: &mut Frame, app: &TuiApp, area: Rect) {
         .collect();
 
     let widths = [
-        Constraint::Length(20),
-        Constraint::Length(6),
-        Constraint::Length(6),
+        Constraint::Length(18),
+        Constraint::Length(9),
         Constraint::Length(8),
+        Constraint::Min(8),
     ];
 
     let table = Table::new(rows, widths).header(header).block(
