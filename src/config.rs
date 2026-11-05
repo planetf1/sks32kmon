@@ -158,15 +158,24 @@ pub fn resolve_switches(
             })
             .collect())
     } else {
-        // No config, no --switch — try env var
-        let host = std::env::var("SKS3200_HOST").unwrap_or_else(|_| "192.168.100.7".to_string());
+        // No config, no --switch — check SKS3200_HOST environment variable
+        let host = match std::env::var("SKS3200_HOST") {
+            Ok(h) if !h.trim().is_empty() => h.trim().to_string(),
+            _ => {
+                bail!(
+                    "No switches specified. Add switches to {}, pass --switch <host>, or set SKS3200_HOST.",
+                    default_config_path().display()
+                );
+            }
+        };
         let user = cli_user.unwrap_or("admin").to_string();
         let password = cli_password
             .map(|s| s.to_string())
             .unwrap_or_else(|| std::env::var("SKS3200_PASSWORD").unwrap_or_default());
         if password.is_empty() {
             bail!(
-                "No password. Use --password, SKS3200_PASSWORD, or configure switches in {}",
+                "No password for switch '{}'. Use --password, SKS3200_PASSWORD, or configure switches in {}",
+                host,
                 default_config_path().display()
             );
         }

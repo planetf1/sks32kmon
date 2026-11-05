@@ -7,11 +7,11 @@ HTML dashboard — no CLI, no SSH, no SNMP.
 **Tested with firmware 2.0.0.3.** Other firmware versions may have different
 API behaviour, especially write endpoints.
 
-**Phase 2: Read-write.** Query system info, port status, traffic statistics,
+**Read-write Switch Management.** Query system info, port status, traffic statistics,
 MAC tables, VLANs, STP, loop protection, and more — plus configure ports, VLANs,
 IGMP, storm control, mirroring, trunk/LACP, loop protection, STP, network settings,
-description, and manage config backups. Write operations run in **mock mode by default**
-(add `--apply` to write to the switch).
+description, and manage config backups. Use `--dry-run` to preview changes without
+applying them, or `--mock` for local offline testing.
 
 ---
 
@@ -28,8 +28,11 @@ sks3200 show status
 # Port status
 sks3200 show ports
 
-# Traffic statistics (live refresh)
-sks3200 show statistics --watch
+# Traffic statistics (live refresh with rates)
+sks3200 show statistics --watch --interval 5
+
+# Live TUI Dashboard (monitoring with dark/light theme, sparklines, config editor)
+sks3200 monitor --interval 10
 
 # MAC address table
 sks3200 show mac
@@ -103,7 +106,7 @@ All commands produce colour-coded, aligned tables with live data.
  Port 10 Link Down        0                0                0                0
 ```
 
-Add `--watch` for a live-updating view (refreshes every 2s).
+Add `--watch` (with optional `-i, --interval <sec>`) for a live-updating view with real-time per-second packet rate deltas (`Tx/s`, `Rx/s`).
 
 ### `sks3200 show mac`
 

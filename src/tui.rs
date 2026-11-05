@@ -28,6 +28,8 @@ struct SwitchData {
     prev_stats_time: Option<Instant>,
     mac_entries: Option<Vec<MacEntry>>,
     last_refresh: Option<chrono::DateTime<Local>>,
+    last_slow_refresh: Option<Instant>,
+    last_config_refresh: Option<Instant>,
     error: Option<String>,
     // Pre-computed per-port rates from the last refresh
     port_rates: Vec<PortRateSnapshot>,
@@ -36,7 +38,7 @@ struct SwitchData {
     // MAC churn tracking
     prev_mac_count: Option<usize>,
     mac_churn: u64,
-    // Cached config data (fetched once per refresh, not on every render)
+    // Cached config data (lazy-fetched only when visiting Config pane)
     network_settings: Option<NetworkSettings>,
     port_vlan: Option<PortVlanResponse>,
     stp_config: Option<StpConfig>,
@@ -65,6 +67,8 @@ impl SwitchData {
             prev_stats_time: None,
             mac_entries: None,
             last_refresh: None,
+            last_slow_refresh: None,
+            last_config_refresh: None,
             error: None,
             port_rates: vec![PortRateSnapshot::default(); 10],
             port_histories: (0..10).map(|_| PortHistory::new()).collect(),
@@ -80,28 +84,45 @@ impl SwitchData {
         })
     }
 
-    fn refresh(&mut self) {
+    /// Refresh switch data gently.
+    ///
+    /// - Live port statistics are fetched on every tick (rates & sparklines).
+    /// - Dynamic MAC table is fetched in Ports (split view) and MAC panes.
+    /// - System info and port settings are refreshed slowly (every 60s or on startup / 'r').
+    /// - Static configuration endpoints are lazy-fetched ONLY when viewing Config pane.
+    fn refresh(&mut self, active_pane: usize, force_full: bool) {
         let now = Instant::now();
 
-        match self.client.get_system_info() {
-            Ok(info) => {
-                self.system_info = Some(info);
-                self.error = None;
+        // 1. Slow refresh (system info & port admin status): initial load or every 60s or on force_full
+        let need_slow = force_full
+            || self.system_info.is_none()
+            || self.port_settings.is_none()
+            || self
+                .last_slow_refresh
+                .map(|t| now.duration_since(t) >= Duration::from_secs(60))
+                .unwrap_or(true);
+
+        if need_slow {
+            match self.client.get_system_info() {
+                Ok(info) => {
+                    self.system_info = Some(info);
+                    self.error = None;
+                }
+                Err(e) => {
+                    if self.system_info.is_none() {
+                        self.error = Some(format!("Status: {}", e));
+                        return;
+                    }
+                }
             }
-            Err(e) => {
-                self.error = Some(format!("Status: {}", e));
-                return;
+
+            if let Ok(ports) = self.client.get_port_settings() {
+                self.port_settings = Some(ports);
             }
+            self.last_slow_refresh = Some(now);
         }
 
-        match self.client.get_port_settings() {
-            Ok(ports) => self.port_settings = Some(ports),
-            Err(e) => {
-                self.error = Some(format!("Port settings: {}", e));
-                return;
-            }
-        }
-
+        // 2. Fast/Dynamic refresh: Port statistics (always fetched for live traffic / rates / sparklines)
         match self.client.get_port_statistics() {
             Ok(stats) => {
                 // Compute per-port rates from counter deltas
@@ -109,6 +130,16 @@ impl SwitchData {
                     .prev_stats_time
                     .map(|t| now.duration_since(t).as_secs_f64().max(0.1))
                     .unwrap_or(1.0);
+
+                let ports_list = stats.ports();
+                let num_ports = ports_list.len();
+                if self.port_rates.len() < num_ports {
+                    self.port_rates
+                        .resize_with(num_ports, PortRateSnapshot::default);
+                }
+                if self.port_histories.len() < num_ports {
+                    self.port_histories.resize_with(num_ports, PortHistory::new);
+                }
 
                 let prev_ports = self.prev_port_stats.as_ref().map(|p| p.ports());
 
@@ -157,38 +188,55 @@ impl SwitchData {
                 self.prev_port_stats = self.port_stats.take();
                 self.prev_stats_time = Some(now);
                 self.port_stats = Some(stats);
+                self.error = None;
             }
             Err(e) => {
                 self.error = Some(format!("Port stats: {}", e));
-                return;
             }
         }
 
-        match self.client.get_dynamic_mac_entries() {
-            Ok(entries) => {
-                // Track MAC churn: absolute change in entry count
-                let new_count = entries.len();
-                if let Some(prev) = self.prev_mac_count {
-                    self.mac_churn = (new_count as i64 - prev as i64).unsigned_abs();
-                } else {
-                    self.mac_churn = 0;
+        // 3. Dynamic MAC table: fetch when in Ports (pane 0 has split view) or MAC (pane 1)
+        if active_pane == 0 || active_pane == 1 || force_full {
+            match self.client.get_dynamic_mac_entries() {
+                Ok(entries) => {
+                    // Track MAC churn: absolute change in entry count
+                    let new_count = entries.len();
+                    if let Some(prev) = self.prev_mac_count {
+                        self.mac_churn = (new_count as i64 - prev as i64).unsigned_abs();
+                    } else {
+                        self.mac_churn = 0;
+                    }
+                    self.prev_mac_count = Some(new_count);
+                    self.mac_entries = Some(entries);
                 }
-                self.prev_mac_count = Some(new_count);
-                self.mac_entries = Some(entries);
-            }
-            Err(e) => {
-                self.error = Some(format!("MAC: {}", e));
+                Err(e) => {
+                    if self.error.is_none() {
+                        self.error = Some(format!("MAC: {}", e));
+                    }
+                }
             }
         }
 
-        // Config pane caches — non-fatal (Config pane just shows stale data on error)
-        self.network_settings = self.client.get_network_settings().ok();
-        self.port_vlan = self.client.get_port_vlan().ok();
-        self.stp_config = self.client.get_stp_config().ok();
-        self.igmp_config = self.client.get_igmp_config().ok();
-        self.storm_control = self.client.get_storm_control().ok();
-        self.port_mirror = self.client.get_port_mirror().ok();
-        self.trunk_config = self.client.get_trunk_config().ok();
+        // 4. Lazy-fetch Config pane data: ONLY when active_pane == 2
+        if active_pane == 2 {
+            let need_config = force_full
+                || self.network_settings.is_none()
+                || self
+                    .last_config_refresh
+                    .map(|t| now.duration_since(t) >= Duration::from_secs(60))
+                    .unwrap_or(true);
+
+            if need_config {
+                self.network_settings = self.client.get_network_settings().ok();
+                self.port_vlan = self.client.get_port_vlan().ok();
+                self.stp_config = self.client.get_stp_config().ok();
+                self.igmp_config = self.client.get_igmp_config().ok();
+                self.storm_control = self.client.get_storm_control().ok();
+                self.port_mirror = self.client.get_port_mirror().ok();
+                self.trunk_config = self.client.get_trunk_config().ok();
+                self.last_config_refresh = Some(now);
+            }
+        }
 
         self.last_refresh = Some(chrono::Local::now());
     }
@@ -231,6 +279,98 @@ impl PortHistory {
 }
 
 // ---------------------------------------------------------------------------
+// Theme support (Dark / Light)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum Theme {
+    #[default]
+    Dark,
+    Light,
+}
+
+impl Theme {
+    pub fn toggle(&mut self) {
+        *self = match *self {
+            Theme::Dark => Theme::Light,
+            Theme::Light => Theme::Dark,
+        };
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            Theme::Dark => "Dark",
+            Theme::Light => "Light",
+        }
+    }
+
+    pub fn fg(&self) -> Color {
+        match self {
+            Theme::Dark => Color::White,
+            Theme::Light => Color::Black,
+        }
+    }
+
+    pub fn border(&self, active: bool) -> Color {
+        match (self, active) {
+            (Theme::Dark, true) => Color::Cyan,
+            (Theme::Dark, false) => Color::DarkGray,
+            (Theme::Light, true) => Color::Blue,
+            (Theme::Light, false) => Color::Gray,
+        }
+    }
+
+    pub fn table_header_bg(&self) -> Color {
+        match self {
+            Theme::Dark => Color::DarkGray,
+            Theme::Light => Color::Rgb(215, 225, 240),
+        }
+    }
+
+    pub fn table_header_fg(&self) -> Color {
+        match self {
+            Theme::Dark => Color::White,
+            Theme::Light => Color::Black,
+        }
+    }
+
+    pub fn agg_row_bg(&self) -> Color {
+        match self {
+            Theme::Dark => Color::DarkGray,
+            Theme::Light => Color::Rgb(225, 230, 240),
+        }
+    }
+
+    pub fn dim(&self) -> Color {
+        match self {
+            Theme::Dark => Color::DarkGray,
+            Theme::Light => Color::Rgb(120, 120, 130),
+        }
+    }
+
+    pub fn primary(&self) -> Color {
+        match self {
+            Theme::Dark => Color::Cyan,
+            Theme::Light => Color::Blue,
+        }
+    }
+
+    pub fn sparkline(&self) -> Color {
+        match self {
+            Theme::Dark => Color::Cyan,
+            Theme::Light => Color::Blue,
+        }
+    }
+
+    pub fn footer_bg(&self) -> Color {
+        match self {
+            Theme::Dark => Color::Black,
+            Theme::Light => Color::Rgb(230, 230, 235),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // App state
 // ---------------------------------------------------------------------------
 
@@ -241,6 +381,7 @@ struct TuiApp {
     scroll_offset_mac: usize,
     active_pane: usize, // 0 = port, 1 = MAC, 2 = Config
     refresh_interval: u64,
+    theme: Theme,
     // Config editing
     config_cursor: usize, // which field row (0-indexed) is selected
     config_scroll: usize, // scroll offset in config pane
@@ -258,13 +399,15 @@ impl TuiApp {
     }
 
     fn refresh_all(&mut self) {
+        let active = self.active_pane;
         for sw in &mut self.switches {
-            sw.refresh();
+            sw.refresh(active, true);
         }
     }
 
     fn refresh_current(&mut self) {
-        self.current_mut().refresh();
+        let active = self.active_pane;
+        self.current_mut().refresh(active, false);
     }
 }
 
@@ -272,10 +415,12 @@ impl TuiApp {
 // Public entry point
 // ---------------------------------------------------------------------------
 
-pub fn run_tui(targets: &[SwitchTarget], mock: bool) -> Result<()> {
+pub fn run_tui(targets: &[SwitchTarget], mock: bool, initial_interval: Option<u64>) -> Result<()> {
     if targets.is_empty() {
         anyhow::bail!("No switches to monitor");
     }
+
+    let interval = initial_interval.unwrap_or(10).clamp(3, 60);
 
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -291,8 +436,6 @@ pub fn run_tui(targets: &[SwitchTarget], mock: bool) -> Result<()> {
         match SwitchData::new(target.clone(), mock) {
             Ok(sd) => switches.push(sd),
             Err(e) => {
-                // Print error to stderr before entering TUI, but can't now in raw mode.
-                // We'll still try to show what we can.
                 eprintln!("Failed to connect to {}: {}", target.host, e);
             }
         }
@@ -308,7 +451,8 @@ pub fn run_tui(targets: &[SwitchTarget], mock: bool) -> Result<()> {
         scroll_offset_port: 0,
         scroll_offset_mac: 0,
         active_pane: 0,
-        refresh_interval: 3,
+        refresh_interval: interval,
+        theme: Theme::Dark,
         config_cursor: 0,
         config_scroll: 0,
         editing: false,
@@ -356,6 +500,9 @@ pub fn run_tui(targets: &[SwitchTarget], mock: bool) -> Result<()> {
                         KeyCode::Esc => break,
                         KeyCode::Char('r') | KeyCode::Char('R') => {
                             app.refresh_all();
+                        }
+                        KeyCode::Char('t') | KeyCode::Char('T') => {
+                            app.theme.toggle();
                         }
                         KeyCode::Tab => {
                             app.active_pane = (app.active_pane + 1) % 3;
@@ -416,7 +563,7 @@ pub fn run_tui(targets: &[SwitchTarget], mock: bool) -> Result<()> {
                         }
                         KeyCode::Up | KeyCode::Down => {}
                         KeyCode::Char('+') | KeyCode::Char('=') => {
-                            app.refresh_interval = app.refresh_interval.saturating_sub(1).max(1);
+                            app.refresh_interval = app.refresh_interval.saturating_sub(1).max(3);
                         }
                         KeyCode::Char('-') | KeyCode::Char('_') => {
                             app.refresh_interval = (app.refresh_interval + 1).min(60);
@@ -491,9 +638,30 @@ fn draw_ui(f: &mut Frame, app: &TuiApp) {
 fn render_header(f: &mut Frame, app: &TuiApp, area: Rect) {
     let current = app.current();
 
-    let info = match &current.system_info {
+    let mut spans = Vec::new();
+
+    // Mode / Model badge
+    if current.client.is_mock() {
+        spans.push(Span::styled(
+            " ◌ MOCK ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    } else {
+        spans.push(Span::styled(
+            " ● SKS3200 ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    spans.push(Span::raw(" "));
+
+    match &current.system_info {
         Some(i) => {
-            // Count active ports (link up + enabled)
             let active_count = current
                 .port_stats
                 .as_ref()
@@ -504,26 +672,66 @@ fn render_header(f: &mut Frame, app: &TuiApp, area: Rect) {
                         .count()
                 })
                 .unwrap_or(0);
-            let title = format!(
-                " SKS3200-8E2X @ {}  |  FW: {}  HW: {}  MAC: {}  {}°C  |  {}  |  Up: {}/10",
-                i.sys_ipv4, i.fw_ver, i.hw_ver, i.sys_macaddr, i.temperature, i.des, active_count
-            );
-            Span::styled(
-                title,
-                Style::default()
-                    .fg(Color::White)
-                    .bg(Color::Blue)
-                    .add_modifier(Modifier::BOLD),
-            )
-        }
-        None => Span::styled(
-            " Connecting... ",
-            Style::default().fg(Color::White).bg(Color::Blue),
-        ),
-    };
 
-    // Tab indicator: show switch name tags
-    let mut tags = Vec::new();
+            // Switch host & name
+            spans.push(Span::styled(
+                format!("{} ", i.des),
+                Style::default()
+                    .fg(app.theme.fg())
+                    .add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::styled(
+                format!("({})", i.sys_ipv4),
+                Style::default().fg(app.theme.primary()),
+            ));
+            spans.push(Span::raw("  "));
+
+            // Temperature with friendly color/icon
+            let temp_val: u32 = i.temperature.parse().unwrap_or(0);
+            let (temp_icon, temp_style) = if temp_val >= 68 {
+                (
+                    "🔥",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                )
+            } else if temp_val >= 58 {
+                ("♨", Style::default().fg(Color::Yellow))
+            } else if temp_val >= 48 {
+                ("☕", Style::default().fg(Color::Green))
+            } else {
+                ("❄", Style::default().fg(app.theme.primary()))
+            };
+            spans.push(Span::styled(
+                format!("{} {}°C  ", temp_icon, i.temperature),
+                temp_style,
+            ));
+
+            // Ports up badge
+            let up_style = if active_count > 0 {
+                Style::default().fg(Color::Green)
+            } else {
+                Style::default().fg(app.theme.dim())
+            };
+            spans.push(Span::styled(
+                format!("Ports: {}/10 ▲  ", active_count),
+                up_style,
+            ));
+
+            // FW / HW
+            spans.push(Span::styled(
+                format!("FW:{} HW:{}  ", i.fw_ver, i.hw_ver),
+                Style::default().fg(app.theme.dim()),
+            ));
+        }
+        None => {
+            spans.push(Span::styled(
+                "Connecting...",
+                Style::default().fg(Color::Yellow),
+            ));
+        }
+    }
+
+    // Switch selection tabs
+    let mut switch_pills = Vec::new();
     for (i, sw) in app.switches.iter().enumerate() {
         let label = if sw.target.name != sw.target.host {
             format!(" {} ", sw.target.name)
@@ -531,26 +739,26 @@ fn render_header(f: &mut Frame, app: &TuiApp, area: Rect) {
             format!(" {} ", sw.target.host)
         };
         if i == app.current_switch {
-            tags.push(Span::styled(
+            switch_pills.push(Span::styled(
                 label,
                 Style::default()
                     .fg(Color::Black)
-                    .bg(Color::Cyan)
+                    .bg(app.theme.primary())
                     .add_modifier(Modifier::BOLD),
             ));
         } else {
-            tags.push(Span::styled(label, Style::default().fg(Color::DarkGray)));
+            switch_pills.push(Span::styled(label, Style::default().fg(app.theme.dim())));
         }
     }
 
-    let mut line = Line::from(info);
-    line.push_span(Span::raw("  "));
-    line.extend(tags);
+    let mut line = Line::from(spans);
+    line.push_span(Span::raw(" "));
+    line.extend(switch_pills);
 
     let p = Paragraph::new(line).block(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::White).bg(Color::Blue)),
+            .border_style(Style::default().fg(app.theme.border(true))),
     );
 
     f.render_widget(p, area);
@@ -588,11 +796,7 @@ fn render_body(f: &mut Frame, app: &TuiApp, area: Rect) {
 // ---------------------------------------------------------------------------
 
 fn render_port_pane(f: &mut Frame, app: &TuiApp, area: Rect) {
-    let border_style = if app.active_pane == 0 {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
+    let border_style = Style::default().fg(app.theme.border(app.active_pane == 0));
 
     let current = app.current();
     let stats = match &current.port_stats {
@@ -652,8 +856,11 @@ fn render_port_pane(f: &mut Frame, app: &TuiApp, area: Rect) {
             Style::default().add_modifier(Modifier::BOLD),
         ))
     });
-    let header =
-        Row::new(header_cells).style(Style::default().bg(Color::DarkGray).fg(Color::White));
+    let header = Row::new(header_cells).style(
+        Style::default()
+            .bg(app.theme.table_header_bg())
+            .fg(app.theme.table_header_fg()),
+    );
 
     // Pre-compute aggregate totals
     let mut agg_tx: u64 = 0;
@@ -670,31 +877,73 @@ fn render_port_pane(f: &mut Frame, app: &TuiApp, area: Rect) {
             let status_style = if p.port_status == "Disabled" {
                 Style::default().fg(Color::Red)
             } else if p.link_status == "Link Down" {
-                Style::default().fg(Color::DarkGray)
+                Style::default().fg(app.theme.dim())
             } else {
-                Style::default().fg(Color::Green)
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD)
             };
 
             let status_str = if p.link_status != "Link Down" && p.port_status == "Enabled" {
-                "Up"
+                "● Up"
             } else if p.port_status == "Disabled" {
-                "Disabled"
+                "⊘ Off"
             } else {
-                "Down"
+                "○ Down"
             };
 
             let speed_str = if p.link_status != "Link Down" {
                 shorten_speed(&p.link_status)
             } else {
-                "--"
+                "─"
+            };
+
+            let speed_style = match speed_str {
+                "10G" => Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+                "2.5G" => Style::default()
+                    .fg(app.theme.primary())
+                    .add_modifier(Modifier::BOLD),
+                "1G" => Style::default().fg(Color::Green),
+                "100M" => Style::default().fg(Color::Yellow),
+                _ => Style::default().fg(app.theme.dim()),
             };
 
             // Use pre-computed rates from SwitchData
-            let rates = &current.port_rates[*i];
-            let tx_str = format_rate(rates.tx_rate);
-            let rx_str = format_rate(rates.rx_rate);
-            let tx_err_str = format_rate(rates.tx_err_rate);
-            let rx_err_str = format_rate(rates.rx_err_rate);
+            let fallback_rates = PortRateSnapshot::default();
+            let rates = current.port_rates.get(*i).unwrap_or(&fallback_rates);
+            let tx_str = if rates.tx_rate > 0 {
+                format_rate(rates.tx_rate)
+            } else {
+                "─".to_string()
+            };
+            let rx_str = if rates.rx_rate > 0 {
+                format_rate(rates.rx_rate)
+            } else {
+                "─".to_string()
+            };
+            let tx_err_str = if rates.tx_err_rate > 0 {
+                format_rate(rates.tx_err_rate)
+            } else {
+                "0".to_string()
+            };
+            let rx_err_str = if rates.rx_err_rate > 0 {
+                format_rate(rates.rx_err_rate)
+            } else {
+                "0".to_string()
+            };
+
+            let tx_err_style = if rates.tx_err_rate > 0 {
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(app.theme.dim())
+            };
+            let rx_err_style = if rates.rx_err_rate > 0 {
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(app.theme.dim())
+            };
 
             // Error ratio: bad / (good + bad) * 100
             let total_pkts = rates.tx_rate + rates.rx_rate + rates.tx_err_rate + rates.rx_err_rate;
@@ -704,7 +953,9 @@ fn render_port_pane(f: &mut Frame, app: &TuiApp, area: Rect) {
             } else {
                 0.0
             };
-            let err_str = if err_pct < 0.01 && total_pkts > 0 {
+            let err_str = if total_errs == 0 {
+                "0%".to_string()
+            } else if err_pct < 0.01 {
                 "<0.01%".to_string()
             } else {
                 format!("{:.2}%", err_pct)
@@ -714,8 +965,8 @@ fn render_port_pane(f: &mut Frame, app: &TuiApp, area: Rect) {
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
             } else if err_pct > 0.1 {
                 Style::default().fg(Color::Yellow)
-            } else if total_pkts == 0 {
-                Style::default().fg(Color::DarkGray)
+            } else if total_pkts == 0 || total_errs == 0 {
+                Style::default().fg(app.theme.dim())
             } else {
                 Style::default().fg(Color::Green)
             };
@@ -727,20 +978,32 @@ fn render_port_pane(f: &mut Frame, app: &TuiApp, area: Rect) {
             agg_rx_err += rates.rx_err_rate;
 
             let cells = vec![
-                Cell::from(Span::raw(format!("P{}", port_num))),
-                Cell::from(Span::styled(status_str, status_style)),
                 Cell::from(Span::styled(
-                    speed_str,
-                    if speed_str == "--" {
-                        Style::default().fg(Color::DarkGray)
+                    format!("P{}", port_num),
+                    Style::default()
+                        .fg(app.theme.fg())
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Cell::from(Span::styled(status_str, status_style)),
+                Cell::from(Span::styled(speed_str, speed_style)),
+                Cell::from(Span::styled(
+                    tx_str,
+                    if rates.tx_rate > 0 {
+                        Style::default().fg(app.theme.fg())
                     } else {
-                        Style::default().fg(Color::Green)
+                        Style::default().fg(app.theme.dim())
                     },
                 )),
-                Cell::from(Span::raw(tx_str)),
-                Cell::from(Span::raw(rx_str)),
-                Cell::from(Span::raw(tx_err_str)),
-                Cell::from(Span::raw(rx_err_str)),
+                Cell::from(Span::styled(
+                    rx_str,
+                    if rates.rx_rate > 0 {
+                        Style::default().fg(app.theme.fg())
+                    } else {
+                        Style::default().fg(app.theme.dim())
+                    },
+                )),
+                Cell::from(Span::styled(tx_err_str, tx_err_style)),
+                Cell::from(Span::styled(rx_err_str, rx_err_style)),
                 Cell::from(Span::styled(err_str, err_style)),
             ];
             Row::new(cells)
@@ -800,7 +1063,11 @@ fn render_port_pane(f: &mut Frame, app: &TuiApp, area: Rect) {
             Style::default().add_modifier(Modifier::BOLD),
         )),
     ])
-    .style(Style::default().bg(Color::DarkGray));
+    .style(
+        Style::default()
+            .bg(app.theme.agg_row_bg())
+            .fg(app.theme.table_header_fg()),
+    );
 
     let mut all_rows = rows;
     all_rows.push(agg_row);
@@ -877,7 +1144,8 @@ fn render_sparklines(f: &mut Frame, app: &TuiApp, area: Rect) {
         }
 
         let port_num = port_idx + 1;
-        let rates = &current.port_rates[*port_idx];
+        let fallback_rates = PortRateSnapshot::default();
+        let rates = current.port_rates.get(*port_idx).unwrap_or(&fallback_rates);
         let label = format!(
             "P{} {:>6}/{:>6}",
             port_num,
@@ -888,10 +1156,10 @@ fn render_sparklines(f: &mut Frame, app: &TuiApp, area: Rect) {
         let sparkline = Sparkline::default()
             .data(&data)
             .max(max_val)
-            .style(Style::default().fg(Color::Cyan));
+            .style(Style::default().fg(app.theme.sparkline()));
 
         // Render label + sparkline on the same row
-        let label_span = Span::styled(label, Style::default().fg(Color::DarkGray));
+        let label_span = Span::styled(label, Style::default().fg(app.theme.dim()));
         let label_para = Paragraph::new(Line::from(label_span));
         f.render_widget(label_para, rows[idx]);
 
@@ -911,11 +1179,7 @@ fn render_sparklines(f: &mut Frame, app: &TuiApp, area: Rect) {
 // ---------------------------------------------------------------------------
 
 fn render_mac_pane(f: &mut Frame, app: &TuiApp, area: Rect) {
-    let border_style = if app.active_pane == 1 {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
+    let border_style = Style::default().fg(app.theme.border(app.active_pane == 1));
 
     let current = app.current();
     let entries = match &current.mac_entries {
@@ -943,19 +1207,39 @@ fn render_mac_pane(f: &mut Frame, app: &TuiApp, area: Rect) {
             Style::default().add_modifier(Modifier::BOLD),
         ))
     });
-    let header =
-        Row::new(header_cells).style(Style::default().bg(Color::DarkGray).fg(Color::White));
+    let header = Row::new(header_cells).style(
+        Style::default()
+            .bg(app.theme.table_header_bg())
+            .fg(app.theme.table_header_fg()),
+    );
 
     let rows: Vec<Row> = entries
         .iter()
         .skip(scroll)
         .take(max_visible)
         .map(|e| {
+            let age_display = if e.age_timer >= 60 {
+                format!("{}m {:02}s", e.age_timer / 60, e.age_timer % 60)
+            } else {
+                format!("{}s", e.age_timer)
+            };
             Row::new(vec![
-                Cell::from(Span::raw(e.mac_addr.clone())),
-                Cell::from(Span::raw(e.vlan_id.to_string())),
-                Cell::from(Span::raw(e.port_id.to_string())),
-                Cell::from(Span::raw(format!("{}s", e.age_timer))),
+                Cell::from(Span::styled(
+                    e.mac_addr.clone(),
+                    Style::default().fg(app.theme.fg()),
+                )),
+                Cell::from(Span::styled(
+                    format!("VLAN {}", e.vlan_id),
+                    Style::default().fg(app.theme.dim()),
+                )),
+                Cell::from(Span::styled(
+                    format!("Port {}", e.port_id),
+                    Style::default().fg(app.theme.primary()),
+                )),
+                Cell::from(Span::styled(
+                    age_display,
+                    Style::default().fg(app.theme.dim()),
+                )),
             ])
         })
         .collect();
@@ -1010,7 +1294,7 @@ fn config_fields(app: &TuiApp) -> Vec<ConfigField> {
     // --- System ---
     let info = current.system_info.as_ref();
     fields.push(ConfigField {
-        label: "── System ──".into(),
+        label: "── ⚙ System ──".into(),
         value: String::new(),
         is_header: true,
         section_idx: s,
@@ -1030,7 +1314,7 @@ fn config_fields(app: &TuiApp) -> Vec<ConfigField> {
     // --- Network ---
     let net = &current.network_settings;
     fields.push(ConfigField {
-        label: "── Network ──".into(),
+        label: "── 🌐 Network ──".into(),
         value: String::new(),
         is_header: true,
         section_idx: s,
@@ -1421,7 +1705,7 @@ fn config_field_at(app: &TuiApp, idx: usize) -> ConfigField {
 
 fn render_config_pane(f: &mut Frame, app: &TuiApp, area: Rect) {
     let current = app.current();
-    let border_style = Style::default().fg(Color::Cyan);
+    let border_style = Style::default().fg(app.theme.border(true));
 
     let mock_label = if current.client.is_mock() {
         " [MOCK MODE — safe] "
@@ -1443,8 +1727,8 @@ fn render_config_pane(f: &mut Frame, app: &TuiApp, area: Rect) {
         Style::default().fg(Color::Red).bg(Color::White),
     )]));
     lines.push(Line::from(vec![Span::styled(
-        "Keys: ↑↓=navigate  Enter=edit  a=apply  s=save  Tab=next pane  ←→=switch  q=quit",
-        Style::default().fg(Color::DarkGray),
+        "Keys: ↑↓=navigate  Enter=edit  a=apply  s=save  Tab=next pane  ←→=switch  t=theme  q=quit",
+        Style::default().fg(app.theme.dim()),
     )]));
 
     if app.editing {
@@ -1453,12 +1737,12 @@ fn render_config_pane(f: &mut Frame, app: &TuiApp, area: Rect) {
             Span::styled(
                 &app.edit_buffer,
                 Style::default()
-                    .fg(Color::White)
+                    .fg(app.theme.fg())
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 "  [Enter=commit Esc=cancel]",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(app.theme.dim()),
             ),
         ]));
     } else {
@@ -1480,10 +1764,10 @@ fn render_config_pane(f: &mut Frame, app: &TuiApp, area: Rect) {
         };
         let cursor_style = if i == app.config_cursor {
             Style::default()
-                .fg(Color::Cyan)
+                .fg(app.theme.primary())
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default()
+            Style::default().fg(app.theme.fg())
         };
 
         if field.is_header {
@@ -1852,16 +2136,18 @@ fn render_footer(f: &mut Frame, app: &TuiApp, area: Rect) {
     let mut parts = vec![
         Span::styled(" [q] Quit ", Style::default().fg(Color::Yellow)),
         Span::styled(" [r] Refresh ", Style::default().fg(Color::Yellow)),
+        Span::styled(" [t] Theme ", Style::default().fg(Color::Yellow)),
         Span::styled(
             format!(" [+/-] {}s ", app.refresh_interval),
             Style::default().fg(Color::Yellow),
         ),
         Span::styled(
             format!(" [←→] {} ", switch_label),
-            Style::default().fg(Color::Cyan),
+            Style::default().fg(app.theme.primary()),
         ),
         Span::raw(format!(" | Pane: {}", pane_name)),
         Span::raw(format!(" | Last: {}", time_str)),
+        Span::raw(format!(" | Theme: {}", app.theme.name())),
     ];
 
     if let Some(err) = &current.error {
@@ -1871,8 +2157,11 @@ fn render_footer(f: &mut Frame, app: &TuiApp, area: Rect) {
         ));
     }
 
-    let p =
-        Paragraph::new(Line::from(parts)).style(Style::default().bg(Color::Black).fg(Color::White));
+    let p = Paragraph::new(Line::from(parts)).style(
+        Style::default()
+            .bg(app.theme.footer_bg())
+            .fg(app.theme.fg()),
+    );
     f.render_widget(p, area);
 }
 

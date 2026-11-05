@@ -212,7 +212,28 @@ Features:
 
 ---
 
-## 7. Future Work (Phase 2)
+## 7. Gentle Management & Polling Architecture
+
+Embedded switch management microcontrollers (MIPS/ARM SoC with ~32–64MB RAM) run a single-threaded embedded HTTP server alongside ASIC configuration daemons. To avoid management CPU starvation, socket exhaustion, or OOM crashes, `sks3200` enforces strict gentleness invariants:
+
+1. **Persistent Session Cookie Caching & Transparent Re-Auth**:
+   - Authenticated session cookies are cached on disk (`~/.cache/sks3200/sessions/`) with a 10-minute TTL.
+   - CLI commands and TUI runs reuse active sessions instead of issuing `GET /authorize` on every command, eliminating session table overflow on the switch.
+   - Transparent retry automatically re-authenticates if a session cookie expires or switch returns `login.html`.
+
+2. **Connection Pooling & Socket Discipline**:
+   - `pool_max_idle_per_host(1)` and `pool_idle_timeout(5s)` ensure idle TCP sockets are cleanly recycled rather than accumulated.
+   - 40ms inter-request pacing prevents burst hammering of embedded web servers.
+
+3. **Decoupled Polling in TUI**:
+   - Default monitoring interval increased to 10 seconds (minimum clamped to 3s).
+   - Fast tick only queries live port traffic counters (`port_statistics.json`) and dynamic MAC table (`mac_get_dynamic_mac_entries.json`).
+   - Slow tick (system info, hardware temperature, port admin status) runs every 60 seconds.
+   - Static configuration endpoints (VLAN, STP, IGMP, storm control, port mirroring, trunking) are lazy-loaded only when the user opens the Config pane.
+
+---
+
+## 8. Future Work (Phase 2)
 
 - **Write support:** ✅ Done (port settings, VLAN, IGMP, storm, mirror, trunk, loop protection, description, network, STP)
 - **Config backup:** ✅ Done (backup/restore with JSON snapshots)

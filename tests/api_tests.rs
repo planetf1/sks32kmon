@@ -687,3 +687,110 @@ fn test_port_statistics_large_values() {
     // Large u64-as-string value
     assert_eq!(stats.port_1.tx_good_pkt, "18446744073709551615");
 }
+
+// ---------------------------------------------------------------------------
+// CLI Argument Parsing Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "cli")]
+mod cli_tests {
+    use clap::Parser;
+    use sks3200::cli::{Args, Command, SetCommand, ShowCommand};
+
+    #[test]
+    fn test_cli_args_monitor_interval() {
+        let args = Args::try_parse_from(["sks3200", "monitor", "-i", "15"]).unwrap();
+        match args.command {
+            Command::Monitor { mock, interval } => {
+                assert!(!mock);
+                assert_eq!(interval, Some(15));
+            }
+            _ => panic!("Expected Monitor command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_args_show_statistics_watch_interval() {
+        let args =
+            Args::try_parse_from(["sks3200", "show", "statistics", "-w", "-i", "5"]).unwrap();
+        match args.command {
+            Command::Show(ShowCommand::Statistics { watch, interval }) => {
+                assert!(watch);
+                assert_eq!(interval, Some(5));
+            }
+            _ => panic!("Expected Show Statistics command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_args_dry_run_set_port() {
+        let args = Args::try_parse_from([
+            "sks3200",
+            "--dry-run",
+            "set",
+            "port",
+            "3",
+            "--status",
+            "disabled",
+            "--speed",
+            "1000",
+        ])
+        .unwrap();
+        assert!(args.dry_run);
+        match args.command {
+            Command::Set(SetCommand::Port {
+                port,
+                status,
+                speed,
+                flow,
+            }) => {
+                assert_eq!(port, 3);
+                assert_eq!(status.as_deref(), Some("disabled"));
+                assert_eq!(speed.as_deref(), Some("1000"));
+                assert_eq!(flow, None);
+            }
+            _ => panic!("Expected Set Port command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_args_mock_mode() {
+        let args = Args::try_parse_from(["sks3200", "--mock", "show", "mac"]).unwrap();
+        assert!(args.mock);
+        match args.command {
+            Command::Show(ShowCommand::Mac) => {}
+            _ => panic!("Expected Show Mac command"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Theme and Visual Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "tui")]
+mod theme_tests {
+    use sks3200::tui::Theme;
+
+    #[test]
+    fn test_theme_toggle() {
+        let mut theme = Theme::Dark;
+        assert_eq!(theme.name(), "Dark");
+        theme.toggle();
+        assert_eq!(theme.name(), "Light");
+        theme.toggle();
+        assert_eq!(theme.name(), "Dark");
+    }
+
+    #[test]
+    fn test_theme_colors() {
+        let dark = Theme::Dark;
+        let light = Theme::Light;
+
+        // Ensure distinct foregrounds and borders between themes
+        assert_ne!(dark.fg(), light.fg());
+        assert_ne!(dark.border(true), light.border(true));
+        assert_ne!(dark.table_header_bg(), light.table_header_bg());
+        assert_ne!(dark.footer_bg(), light.footer_bg());
+    }
+}

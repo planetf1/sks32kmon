@@ -112,6 +112,10 @@ pub enum Command {
         /// Use mock mode instead of connecting to real switch
         #[arg(long)]
         mock: bool,
+
+        /// Refresh interval in seconds (default: 10s, min: 3s)
+        #[arg(short = 'i', long = "interval")]
+        interval: Option<u64>,
     },
 
     /// Generate a sample config file template (prints to stdout)
@@ -131,9 +135,13 @@ pub enum ShowCommand {
     Ports,
     /// Port traffic statistics
     Statistics {
-        /// Continuously refresh (every 2s)
+        /// Continuously refresh
         #[arg(short = 'w', long = "watch")]
         watch: bool,
+
+        /// Refresh interval in seconds when watching (default: 2s)
+        #[arg(short = 'i', long = "interval")]
+        interval: Option<u64>,
     },
     /// Dynamic MAC address table
     Mac,
@@ -317,18 +325,39 @@ pub fn run(args: Args) -> Result<()> {
     };
 
     // 2. Resolve switch targets
-    let targets = config::resolve_switches(
+    let is_mock_run = args.mock
+        || match &args.command {
+            #[cfg(feature = "tui")]
+            Command::Monitor { mock, .. } => *mock,
+            #[allow(unreachable_patterns)]
+            _ => false,
+        };
+    let targets = match config::resolve_switches(
         &args.switches,
         args.user.as_deref(),
         args.password.as_deref(),
         &config,
-    )?;
+    ) {
+        Ok(t) => t,
+        Err(e) => {
+            if is_mock_run {
+                vec![SwitchTarget {
+                    name: "mock-switch".to_string(),
+                    host: "mock.local".to_string(),
+                    user: "admin".to_string(),
+                    password: "password".to_string(),
+                }]
+            } else {
+                return Err(e);
+            }
+        }
+    };
 
     // 3. Dispatch
     match &args.command {
         #[cfg(feature = "tui")]
-        Command::Monitor { mock } => {
-            tui::run_tui(&targets, *mock)?;
+        Command::Monitor { mock, interval } => {
+            tui::run_tui(&targets, *mock, *interval)?;
         }
         cmd => {
             for (i, target) in targets.iter().enumerate() {
@@ -394,7 +423,9 @@ fn run_command_on(
         Command::Show(sc) => match sc {
             ShowCommand::Status => cmd_status(client, json),
             ShowCommand::Ports => cmd_ports(client, json),
-            ShowCommand::Statistics { watch } => cmd_statistics(client, json, *watch),
+            ShowCommand::Statistics { watch, interval } => {
+                cmd_statistics(client, json, *watch, *interval)
+            }
             ShowCommand::Mac => cmd_mac(client, json),
             ShowCommand::StaticMac => cmd_static_mac(client, json),
             ShowCommand::Trunk => cmd_trunk(client, json),
@@ -521,7 +552,17 @@ fn cmd_status(client: &ApiClient, json: bool) -> Result<()> {
     println!("  {:<18}  {}", "Hardware:", info.hw_ver);
     println!("  {:<18}  {}", "MAC Address:", info.sys_macaddr);
     println!("  {:<18}  {}", "IP Address:", info.sys_ipv4);
-    println!("  {:<18}  {}°C", "Temperature:", info.temperature.yellow());
+    let temp_val: u32 = info.temperature.parse().unwrap_or(0);
+    let (temp_icon, temp_colored) = if temp_val >= 68 {
+        ("🔥", info.temperature.red().bold())
+    } else if temp_val >= 58 {
+        ("♨", info.temperature.yellow())
+    } else if temp_val >= 48 {
+        ("☕", info.temperature.green())
+    } else {
+        ("❄", info.temperature.cyan())
+    };
+    println!("  {:<18}  {} {}°C", "Temperature:", temp_icon, temp_colored);
 
     if let Some(net) = net {
         println!("  {:<18}  {}", "Netmask:", net.netmask);
@@ -570,13 +611,22 @@ fn cmd_ports(client: &ApiClient, json: bool) -> Result<()> {
 
     for p in ports.ports() {
         let port_str = pad_str(format!("Port {}", p.port_id), 7).bold().to_string();
-        let status_str: String = if p.port_status == "Enabled" {
-            pad_str("Enabled", 10).green().to_string()
+        let (status_bullet, status_str): (&str, String) = if p.port_status != "Enabled" {
+            ("⊘", pad_str("Disabled", 9).red().to_string())
+        } else if p.spd_duplex_actual == "Link Down" {
+            ("○", pad_str("Down", 9).dimmed().to_string())
         } else {
-            pad_str("Disabled", 10).red().to_string()
+            ("●", pad_str("Up", 9).green().bold().to_string())
         };
         let speed_str: String = if p.spd_duplex_actual == "Link Down" {
-            pad_str(&p.spd_duplex_actual, 20).red().to_string()
+            pad_str(&p.spd_duplex_actual, 20).dimmed().to_string()
+        } else if p.spd_duplex_actual.contains("10G") {
+            pad_str(&p.spd_duplex_actual, 20)
+                .magenta()
+                .bold()
+                .to_string()
+        } else if p.spd_duplex_actual.contains("2500M") {
+            pad_str(&p.spd_duplex_actual, 20).cyan().bold().to_string()
         } else {
             pad_str(&p.spd_duplex_actual, 20).green().to_string()
         };
@@ -593,62 +643,169 @@ fn cmd_ports(client: &ApiClient, json: bool) -> Result<()> {
         };
 
         println!(
-            " {} {} {} {} {} {}",
-            port_str, status_str, speed_str, config_str, flow_str, eee_str,
+            " {} {} {} {} {} {} {}",
+            status_bullet, port_str, status_str, speed_str, config_str, flow_str, eee_str,
         );
     }
 
     Ok(())
 }
 
-fn cmd_statistics(client: &ApiClient, json: bool, watch: bool) -> Result<()> {
+fn cmd_statistics(
+    client: &ApiClient,
+    json: bool,
+    watch: bool,
+    interval: Option<u64>,
+) -> Result<()> {
+    let poll_interval = interval.unwrap_or(2).max(1);
+    let mut prev_stats: Option<crate::models::PortStatisticsResponse> = None;
+    let mut prev_time: Option<std::time::Instant> = None;
+
     loop {
         let stats = client.get_port_statistics()?;
+        let now = std::time::Instant::now();
 
         if json {
             println!("{}", serde_json::to_string_pretty(&stats)?);
             if !watch {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_secs(2));
+            std::thread::sleep(std::time::Duration::from_secs(poll_interval));
             continue;
         }
 
-        println!(" {}", "PORT STATISTICS".bold().white());
-        println!("{}", "╌".repeat(100));
-        println!(
-            " {} {} {} {} {} {}",
-            pad_str("Port", 7),
-            pad_str("Status", 16),
-            pad_str("Tx Good", 16),
-            pad_str("Tx Bad", 16),
-            pad_str("Rx Good", 16),
-            pad_str("Rx Bad", 16),
-        );
-        println!("{}", "─".repeat(100));
+        if watch {
+            // Clear screen and move cursor to top left
+            print!("\x1B[2J\x1B[1;1H");
+        }
 
-        for p in stats.ports() {
-            let port_str = pad_str(format!("Port {}", p.port_id), 7).bold().to_string();
-            let status_str: String = if p.link_status == "Link Down" {
-                pad_str(&p.link_status, 16).red().to_string()
-            } else {
-                pad_str(&p.link_status, 16).green().to_string()
-            };
-            let tx_good = pad_str(format_num(&p.tx_good_pkt), 16);
-            let tx_bad = pad_str(format_num(&p.tx_bad_pkt), 16).red().to_string();
-            let rx_good = pad_str(format_num(&p.rx_good_pkt), 16);
-            let rx_bad = pad_str(format_num(&p.rx_bad_pkt), 16).red().to_string();
+        if watch {
+            println!(
+                " {}  (refresh: {}s, press Ctrl+C to stop)",
+                "PORT TRAFFIC & RATES".bold().white(),
+                poll_interval
+            );
+            println!("{}", "╌".repeat(110));
+            println!(
+                " {} {} {} {} {} {} {} {}",
+                pad_str("Port", 7),
+                pad_str("Status", 10),
+                pad_str("Tx/s", 12),
+                pad_str("Rx/s", 12),
+                pad_str("Tx Total", 16),
+                pad_str("Rx Total", 16),
+                pad_str("Tx Err", 12),
+                pad_str("Rx Err", 12),
+            );
+            println!("{}", "─".repeat(110));
 
+            let ports = stats.ports();
+            let dt = prev_time
+                .map(|t| now.duration_since(t).as_secs_f64())
+                .unwrap_or(0.0);
+
+            for (i, p) in ports.iter().enumerate() {
+                let port_str = pad_str(format!("Port {}", p.port_id), 7).bold().to_string();
+                let status_str: String = if p.link_status == "Link Down" {
+                    pad_str("Down", 10).dimmed().to_string()
+                } else {
+                    pad_str("Up", 10).green().bold().to_string()
+                };
+
+                let (tx_rate_str, rx_rate_str) = if let (Some(prev), true) = (&prev_stats, dt > 0.0)
+                {
+                    let prev_ports = prev.ports();
+                    if let Some(prev_p) = prev_ports.get(i) {
+                        let curr_tx: u64 = p.tx_good_pkt.parse().unwrap_or(0);
+                        let prev_tx: u64 = prev_p.tx_good_pkt.parse().unwrap_or(0);
+                        let curr_rx: u64 = p.rx_good_pkt.parse().unwrap_or(0);
+                        let prev_rx: u64 = prev_p.rx_good_pkt.parse().unwrap_or(0);
+
+                        let tx_rate = (curr_tx.saturating_sub(prev_tx) as f64 / dt).round() as u64;
+                        let rx_rate = (curr_rx.saturating_sub(prev_rx) as f64 / dt).round() as u64;
+
+                        (
+                            pad_str(format_rate_val(tx_rate), 12).cyan().to_string(),
+                            pad_str(format_rate_val(rx_rate), 12).cyan().to_string(),
+                        )
+                    } else {
+                        (
+                            pad_str("─", 12).dimmed().to_string(),
+                            pad_str("─", 12).dimmed().to_string(),
+                        )
+                    }
+                } else {
+                    (
+                        pad_str("─", 12).dimmed().to_string(),
+                        pad_str("─", 12).dimmed().to_string(),
+                    )
+                };
+
+                let tx_good = pad_str(format_num(&p.tx_good_pkt), 16);
+                let rx_good = pad_str(format_num(&p.rx_good_pkt), 16);
+                let tx_bad = pad_str(format_num(&p.tx_bad_pkt), 12);
+                let rx_bad = pad_str(format_num(&p.rx_bad_pkt), 12);
+
+                println!(
+                    " {} {} {} {} {} {} {} {}",
+                    port_str,
+                    status_str,
+                    tx_rate_str,
+                    rx_rate_str,
+                    tx_good,
+                    rx_good,
+                    tx_bad,
+                    rx_bad,
+                );
+            }
+
+            prev_stats = Some(stats);
+            prev_time = Some(now);
+        } else {
+            println!(" {}", "PORT STATISTICS".bold().white());
+            println!("{}", "╌".repeat(100));
             println!(
                 " {} {} {} {} {} {}",
-                port_str, status_str, tx_good, tx_bad, rx_good, rx_bad,
+                pad_str("Port", 7),
+                pad_str("Status", 16),
+                pad_str("Tx Good", 16),
+                pad_str("Tx Bad", 16),
+                pad_str("Rx Good", 16),
+                pad_str("Rx Bad", 16),
             );
+            println!("{}", "─".repeat(100));
+
+            for p in stats.ports() {
+                let port_str = pad_str(format!("Port {}", p.port_id), 7).bold().to_string();
+                let status_str: String = if p.link_status == "Link Down" {
+                    pad_str(&p.link_status, 16).dimmed().to_string()
+                } else {
+                    pad_str(&p.link_status, 16).green().bold().to_string()
+                };
+                let tx_good = pad_str(format_num(&p.tx_good_pkt), 16);
+                let tx_bad = if p.tx_bad_pkt == "0" {
+                    pad_str("0", 16).dimmed().to_string()
+                } else {
+                    pad_str(format_num(&p.tx_bad_pkt), 16).red().to_string()
+                };
+                let rx_good = pad_str(format_num(&p.rx_good_pkt), 16);
+                let rx_bad = if p.rx_bad_pkt == "0" {
+                    pad_str("0", 16).dimmed().to_string()
+                } else {
+                    pad_str(format_num(&p.rx_bad_pkt), 16).red().to_string()
+                };
+
+                println!(
+                    " {} {} {} {} {} {}",
+                    port_str, status_str, tx_good, tx_bad, rx_good, rx_bad,
+                );
+            }
         }
 
         if !watch {
             break;
         }
-        std::thread::sleep(std::time::Duration::from_secs(2));
+        std::thread::sleep(std::time::Duration::from_secs(poll_interval));
     }
 
     Ok(())
@@ -669,19 +826,24 @@ fn cmd_mac(client: &ApiClient, json: bool) -> Result<()> {
     );
     println!("{}", "╌".repeat(90));
     println!(
-        " {:<3} {:<22} {:<6} {:<6} {:<6}",
+        " {:<3} {:<22} {:<6} {:<6} {:<10}",
         "#", "MAC Address", "VLAN", "Port", "Age"
     );
     println!("{}", "─".repeat(90));
 
     for (i, e) in entries.iter().enumerate() {
+        let age_display = if e.age_timer >= 60 {
+            format!("{}m {:02}s", e.age_timer / 60, e.age_timer % 60)
+        } else {
+            format!("{}s", e.age_timer)
+        };
         println!(
-            " {:<3} {:<22} {:<6} {:<6} {:<6}s",
+            " {:<3} {:<22} {:<6} {:<6} {:<10}",
             i + 1,
             e.mac_addr,
             e.vlan_id,
             e.port_id,
-            e.age_timer,
+            age_display,
         );
     }
 
@@ -1103,7 +1265,7 @@ fn cmd_all(client: &ApiClient, json: bool) -> Result<()> {
     println!();
     cmd_ports(client, json)?;
     println!();
-    cmd_statistics(client, json, false)?;
+    cmd_statistics(client, json, false, None)?;
     println!();
     cmd_mac(client, json)?;
     println!();
@@ -1928,5 +2090,17 @@ fn format_num(s: &str) -> String {
         format!("{:.1}K", n as f64 / 1_000.0)
     } else {
         n.to_string()
+    }
+}
+
+fn format_rate_val(rate: u64) -> String {
+    if rate >= 1_000_000 {
+        format!("{:.1}M/s", rate as f64 / 1_000_000.0)
+    } else if rate >= 1_000 {
+        format!("{:.1}K/s", rate as f64 / 1_000.0)
+    } else if rate > 0 {
+        format!("{}/s", rate)
+    } else {
+        "0/s".to_string()
     }
 }

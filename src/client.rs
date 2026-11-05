@@ -1,47 +1,109 @@
 use anyhow::{bail, Context, Result};
 use md5::{Digest, Md5};
 use reqwest::blocking::Client as HttpClient;
-use reqwest::cookie::Jar;
+use reqwest::cookie::{CookieStore, Jar};
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::models::*;
 use crate::write_models::*;
+
+/// Session cookie cache format for disk persistence.
+#[derive(Debug, Serialize, Deserialize)]
+struct CachedSession {
+    cookie_str: String,
+    timestamp: u64,
+}
+
+/// Max age to trust a cached session before re-authenticating (10 minutes).
+const SESSION_TTL_SECS: u64 = 600;
+
+/// Inter-request pacing delay in milliseconds to avoid CPU exhaustion on embedded switches.
+const INTER_REQUEST_PACE_MS: u64 = 40;
 
 /// A session-authenticated HTTP client for an SKS3200 switch.
 pub struct SwitchClient {
     base_url: String,
     http: HttpClient,
+    cookie_jar: Arc<Jar>,
+    username: String,
+    password: String,
 }
 
 impl SwitchClient {
     /// Create a new client and authenticate against the switch.
     ///
-    /// The SKS3200 auth mechanism:
-    ///   GET /authorize?loginusr=<md5(username)>&loginpwd=<md5(password)>
-    /// Returns a session cookie on success.
+    /// Reuses cached session cookies from disk if available to avoid
+    /// overflowing the switch's internal session table. Falls back to
+    /// `GET /authorize?loginusr=<md5(username)>&loginpwd=<md5(password)>`.
     pub fn connect(host: &str, username: &str, password: &str) -> Result<Self> {
         let base_url = format!("http://{}", host);
         let cookie_jar = Arc::new(Jar::default());
+
+        // Configure HTTP client with tight socket pooling to avoid leaking idle
+        // connections and exhausting switch file descriptors.
         let http = HttpClient::builder()
             .cookie_store(true)
             .cookie_provider(cookie_jar.clone())
+            .pool_max_idle_per_host(1)
+            .pool_idle_timeout(Duration::from_secs(5))
+            .tcp_keepalive(Some(Duration::from_secs(15)))
             .timeout(Duration::from_secs(10))
             .build()
             .context("Failed to build HTTP client")?;
 
-        let client = Self { base_url, http };
+        let client = Self {
+            base_url,
+            http,
+            cookie_jar,
+            username: username.to_string(),
+            password: password.to_string(),
+        };
 
-        // Compute MD5 hashes
-        let usr_hash = md5_hash(username);
-        let pwd_hash = md5_hash(password);
+        // Try restoring an existing valid session from disk
+        let mut session_restored = false;
+        if let Some(cookie_str) = load_cached_session(host, username) {
+            if let Ok(parsed_url) = reqwest::Url::parse(&client.base_url) {
+                for part in cookie_str.split(';') {
+                    let trimmed = part.trim();
+                    if !trimmed.is_empty() {
+                        client.cookie_jar.add_cookie_str(trimmed, &parsed_url);
+                    }
+                }
+                // Verify the restored session with a lightweight check
+                let check_url = format!("{}/status.json", client.base_url);
+                if let Ok(resp) = client.http.get(&check_url).send() {
+                    if resp.status().is_success() {
+                        if let Ok(text) = resp.text() {
+                            if !text.contains("login.html") {
+                                session_restored = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if !session_restored {
+            client.reauthenticate()?;
+        }
+
+        Ok(client)
+    }
+
+    /// Re-authenticate against the switch and persist session cookie to disk cache.
+    pub fn reauthenticate(&self) -> Result<()> {
+        let usr_hash = md5_hash(&self.username);
+        let pwd_hash = md5_hash(&self.password);
 
         let url = format!(
             "{}/authorize?loginusr={}&loginpwd={}",
-            client.base_url, usr_hash, pwd_hash
+            self.base_url, usr_hash, pwd_hash
         );
 
-        let resp = client
+        let resp = self
             .http
             .get(&url)
             .send()
@@ -51,10 +113,22 @@ impl SwitchClient {
 
         // Success returns a redirect to index.html (or setup.html), failure redirects to login.html
         if text.contains("login.html") {
-            bail!("Authentication failed for {} — check credentials", host);
+            bail!(
+                "Authentication failed for {} — check credentials",
+                self.host()
+            );
         }
 
-        Ok(client)
+        // Save session cookie to disk cache
+        if let Ok(parsed_url) = reqwest::Url::parse(&self.base_url) {
+            if let Some(cookie_val) = self.cookie_jar.cookies(&parsed_url) {
+                if let Ok(cookie_str) = cookie_val.to_str() {
+                    save_cached_session(self.host(), &self.username, cookie_str);
+                }
+            }
+        }
+
+        Ok(())
     }
 
     // -- Read-only API calls ------------------------------------------------
@@ -213,6 +287,7 @@ impl SwitchClient {
     /// Clear port statistics — `GET /clear_statistics.json`
     /// Note: this endpoint uses GET, not POST (switch bug/quirk).
     pub fn clear_statistics(&self) -> Result<WriteResponse> {
+        self.pace();
         let url = self.url("clear_statistics.json");
         let resp = self
             .http
@@ -227,7 +302,28 @@ impl SwitchClient {
         let body = resp.text().context("Read clear_statistics.json failed")?;
 
         if body.contains("login.html") {
-            bail!("Session expired — please reconnect");
+            self.reauthenticate()
+                .context("Session expired and re-authentication failed")?;
+            self.pace();
+            let retry_resp = self
+                .http
+                .get(&url)
+                .send()
+                .context("Retry GET clear_statistics.json failed")?;
+            if !retry_resp.status().is_success() {
+                bail!(
+                    "Retry GET clear_statistics.json returned HTTP {}",
+                    retry_resp.status()
+                );
+            }
+            let retry_body = retry_resp
+                .text()
+                .context("Read retry clear_statistics.json failed")?;
+            if retry_body.contains("login.html") {
+                bail!("Session expired — please reconnect");
+            }
+            return serde_json::from_str(&retry_body)
+                .context("Failed to parse clear_statistics.json response");
         }
 
         serde_json::from_str(&body).context("Failed to parse clear_statistics.json response")
@@ -365,8 +461,15 @@ impl SwitchClient {
         format!("{}/{}", self.base_url, endpoint)
     }
 
-    /// Fetch an endpoint and deserialize as JSON.
+    /// Small delay between requests to avoid overloading embedded switch SoC.
+    fn pace(&self) {
+        std::thread::sleep(Duration::from_millis(INTER_REQUEST_PACE_MS));
+    }
+
+    /// Fetch an endpoint and deserialize as JSON. Automatically re-authenticates
+    /// if the switch session has expired.
     fn get_json<T: serde::de::DeserializeOwned>(&self, endpoint: &str) -> Result<T> {
+        self.pace();
         let url = self.url(endpoint);
         let resp = self
             .http
@@ -382,9 +485,31 @@ impl SwitchClient {
             .text()
             .with_context(|| format!("Read {} failed", endpoint))?;
 
-        // Check for session expiry
+        // Check for session expiry — re-authenticate and retry once
         if body.contains("login.html") {
-            bail!("Session expired — please reconnect");
+            self.reauthenticate()
+                .context("Session expired and re-authentication failed")?;
+            self.pace();
+            let retry_resp = self
+                .http
+                .get(&url)
+                .send()
+                .with_context(|| format!("Retry GET {} failed", endpoint))?;
+            if !retry_resp.status().is_success() {
+                bail!(
+                    "Retry GET {} returned HTTP {}",
+                    endpoint,
+                    retry_resp.status()
+                );
+            }
+            let retry_body = retry_resp
+                .text()
+                .with_context(|| format!("Read retry {} failed", endpoint))?;
+            if retry_body.contains("login.html") {
+                bail!("Session expired — please reconnect");
+            }
+            return serde_json::from_str(&retry_body)
+                .with_context(|| format!("Failed to parse JSON from {}", endpoint));
         }
 
         serde_json::from_str(&body)
@@ -393,6 +518,7 @@ impl SwitchClient {
 
     /// Fetch an endpoint and return raw text (for endpoints with non-standard JSON).
     fn get_raw(&self, endpoint: &str) -> Result<String> {
+        self.pace();
         let url = self.url(endpoint);
         let resp = self
             .http
@@ -409,7 +535,28 @@ impl SwitchClient {
             .with_context(|| format!("Read {} failed", endpoint))?;
 
         if body.contains("login.html") {
-            bail!("Session expired — please reconnect");
+            self.reauthenticate()
+                .context("Session expired and re-authentication failed")?;
+            self.pace();
+            let retry_resp = self
+                .http
+                .get(&url)
+                .send()
+                .with_context(|| format!("Retry GET {} failed", endpoint))?;
+            if !retry_resp.status().is_success() {
+                bail!(
+                    "Retry GET {} returned HTTP {}",
+                    endpoint,
+                    retry_resp.status()
+                );
+            }
+            let retry_body = retry_resp
+                .text()
+                .with_context(|| format!("Read retry {} failed", endpoint))?;
+            if retry_body.contains("login.html") {
+                bail!("Session expired — please reconnect");
+            }
+            return Ok(retry_body);
         }
 
         Ok(body)
@@ -418,8 +565,9 @@ impl SwitchClient {
     /// POST an endpoint with a JSON body and deserialize the response.
     ///
     /// Mirrors `get_json` but uses POST with `Content-Type: application/json`.
-    /// Checks for session expiry in the response body.
+    /// Checks for session expiry in the response body and re-authenticates if needed.
     fn post_json<T: serde::Serialize>(&self, endpoint: &str, body: &T) -> Result<WriteResponse> {
+        self.pace();
         let url = self.url(endpoint);
         let resp = self
             .http
@@ -438,7 +586,35 @@ impl SwitchClient {
 
         // Check for session expiry
         if response_body.contains("login.html") {
-            bail!("Session expired — please reconnect");
+            self.reauthenticate()
+                .context("Session expired and re-authentication failed")?;
+            self.pace();
+            let retry_resp = self
+                .http
+                .post(&url)
+                .json(body)
+                .send()
+                .with_context(|| format!("Retry POST {} failed", endpoint))?;
+            if !retry_resp.status().is_success() {
+                bail!(
+                    "Retry POST {} returned HTTP {}",
+                    endpoint,
+                    retry_resp.status()
+                );
+            }
+            let retry_body = retry_resp
+                .text()
+                .with_context(|| format!("Read retry {} response failed", endpoint))?;
+            if retry_body.contains("login.html") {
+                bail!("Session expired — please reconnect");
+            }
+            if retry_body.trim().is_empty() {
+                return Ok(WriteResponse {
+                    result: Some("success".to_string()),
+                });
+            }
+            return serde_json::from_str(&retry_body)
+                .with_context(|| format!("Failed to parse JSON from {}", endpoint));
         }
 
         // Try to parse as WriteResponse, but accept empty/redirect responses too
@@ -457,10 +633,58 @@ impl SwitchClient {
 // Helpers
 // ---------------------------------------------------------------------------
 
+fn session_cache_path(host: &str, username: &str) -> Option<PathBuf> {
+    let safe_host = host.replace(|c: char| !c.is_alphanumeric() && c != '.' && c != '-', "_");
+    let user_hash = md5_hash(username);
+    let dir = match std::env::var("HOME") {
+        Ok(home) => PathBuf::from(home)
+            .join(".cache")
+            .join("sks3200")
+            .join("sessions"),
+        Err(_) => std::env::temp_dir().join("sks3200_sessions"),
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    Some(dir.join(format!("session_{}_{}.json", safe_host, user_hash)))
+}
+
+fn load_cached_session(host: &str, username: &str) -> Option<String> {
+    let path = session_cache_path(host, username)?;
+    let content = std::fs::read_to_string(path).ok()?;
+    let cached: CachedSession = serde_json::from_str(&content).ok()?;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+    if now.saturating_sub(cached.timestamp) < SESSION_TTL_SECS {
+        Some(cached.cookie_str)
+    } else {
+        None
+    }
+}
+
+fn save_cached_session(host: &str, username: &str, cookie_str: &str) {
+    if let Some(path) = session_cache_path(host, username) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let cached = CachedSession {
+            cookie_str: cookie_str.to_string(),
+            timestamp: now,
+        };
+        if let Ok(json) = serde_json::to_string(&cached) {
+            let _ = std::fs::write(path, json);
+        }
+    }
+}
+
 pub fn md5_hash(input: &str) -> String {
     let mut hasher = Md5::new();
     hasher.update(input.as_bytes());
-    format!("{:x}", hasher.finalize())
+    let result = hasher.finalize();
+    let mut hex = String::with_capacity(32);
+    for b in result {
+        use std::fmt::Write;
+        let _ = write!(hex, "{:02x}", b);
+    }
+    hex
 }
 
 /// Parse dynamic MAC entries from the weird `data: [...]data: [...]` format.
