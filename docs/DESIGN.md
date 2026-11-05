@@ -205,7 +205,7 @@ A ratatui-based dashboard showing:
 
 Features:
 - Top pane: system info, refresh every 5s
-- Middle pane: port summary table, refresh every 2s
+- Middle pane: port summary table, refresh every 10s by default (3–60s)
 - Bottom pane: MAC table or detail view
 - Tab/arrow navigation between panes
 - `q` to quit, `r` to force refresh

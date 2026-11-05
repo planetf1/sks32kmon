@@ -106,7 +106,7 @@ All commands produce colour-coded, aligned tables with live data.
  Port 10 Link Down        0                0                0                0
 ```
 
-Add `--watch` (with optional `-i, --interval <sec>`) for a live-updating view with real-time per-second packet rate deltas (`Tx/s`, `Rx/s`).
+Add `--watch` (with optional `-i, --interval <sec>`) for a live-updating view with real-time per-second packet rate deltas (`Tx/s`, `Rx/s`). The interval defaults to 5 s and is clamped to a minimum of 3 s: faster polling has frozen the switch's embedded web server on real hardware.
 
 ### `sks3200 show mac`
 
@@ -200,7 +200,7 @@ colour-coded **error ratio** (Err%): green <0.1%, yellow 0.1–1%, red >1%.
 The aggregate **Σ row** sums throughput across all ports.
 
 **Sparklines** show 60-point traffic history per active port (bar-chart trend
-over ~3 minutes at the default 3s refresh).
+over 10 minutes at the default 10 s refresh, 3 minutes at the 3 s minimum).
 
 **MAC churn** (title counter) tracks how many entries appeared or disappeared
 between refreshes. The header shows the **active port count** (Up: N/10).
@@ -210,9 +210,27 @@ Run it:
 sks3200 -s 192.168.100.7 monitor
 ```
 
-Keys: `q` to quit, `Tab` to cycle panes (Ports → MAC → Config), `←`/`→` to
-switch between configured switches, `+`/`-` to adjust refresh rate (1–60 s),
+Keys: `q` to quit, `r` to refresh now, `t` to toggle the dark/light theme,
+`Tab` to cycle panes (Ports → MAC → Config), `←`/`→` to switch between
+configured switches, `+`/`-` to adjust the refresh rate (3–60 s, default 10 s),
 arrows to scroll, `Enter` to edit a field in the Config pane.
+
+The theme paints its own background, so text stays readable whatever your
+terminal's colour scheme. The initial theme follows `COLORFGBG` where the
+terminal sets it, and defaults to dark otherwise.
+
+**Gentle polling.** The switch's embedded web server is fragile, so the
+dashboard keeps its request load low:
+
+- Port statistics are fetched every refresh; system info and port settings
+  every 60 s; the dynamic MAC table (a full hardware table dump on the switch)
+  at most every 30 s; Config pane data only while that pane is open.
+- One keep-alive HTTP connection is reused across refreshes.
+- Pane and switch changes refresh at most once a second, so holding a key
+  cannot flood the switch.
+- If a request times out or cannot connect, the rest of that refresh is
+  skipped. After two refreshes in which the switch did not answer at all, the
+  dashboard sends a single probe request per refresh until it responds.
 
 ## Commands
 
