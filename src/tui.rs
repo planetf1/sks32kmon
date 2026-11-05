@@ -27,9 +27,12 @@ struct SwitchData {
     prev_port_stats: Option<PortStatisticsResponse>,
     prev_stats_time: Option<Instant>,
     mac_entries: Option<Vec<MacEntry>>,
+    last_mac_refresh: Option<Instant>,
     last_refresh: Option<chrono::DateTime<Local>>,
     last_slow_refresh: Option<Instant>,
     last_config_refresh: Option<Instant>,
+    // Consecutive refreshes in which every request failed (outage guard)
+    consecutive_failed_refreshes: u32,
     error: Option<String>,
     // Pre-computed per-port rates from the last refresh
     port_rates: Vec<PortRateSnapshot>,
@@ -66,9 +69,11 @@ impl SwitchData {
             prev_port_stats: None,
             prev_stats_time: None,
             mac_entries: None,
+            last_mac_refresh: None,
             last_refresh: None,
             last_slow_refresh: None,
             last_config_refresh: None,
+            consecutive_failed_refreshes: 0,
             error: None,
             port_rates: vec![PortRateSnapshot::default(); 10],
             port_histories: (0..10).map(|_| PortHistory::new()).collect(),
@@ -92,9 +97,15 @@ impl SwitchData {
     /// - Static configuration endpoints are lazy-fetched ONLY when viewing Config pane.
     fn refresh(&mut self, active_pane: usize, force_full: bool) {
         let now = Instant::now();
+        // Outage guard: once every request in a refresh has failed repeatedly,
+        // probe with a single cheap request instead of the full burst — a
+        // struggling embedded web server needs fewer requests, not more.
+        let probe_only = self.consecutive_failed_refreshes >= OUTAGE_PROBE_THRESHOLD;
+        let mut any_ok = false;
 
         // 1. Slow refresh (system info & port admin status): initial load or every 60s or on force_full
-        let need_slow = force_full
+        let need_slow = probe_only
+            || force_full
             || self.system_info.is_none()
             || self.port_settings.is_none()
             || self
@@ -107,136 +118,161 @@ impl SwitchData {
                 Ok(info) => {
                     self.system_info = Some(info);
                     self.error = None;
+                    any_ok = true;
                 }
                 Err(e) => {
-                    if self.system_info.is_none() {
+                    if self.system_info.is_none() || probe_only {
                         self.error = Some(format!("Status: {}", e));
                     }
                 }
             }
 
-            if let Ok(ports) = self.client.get_port_settings() {
-                self.port_settings = Some(ports);
+            if !probe_only {
+                if let Ok(ports) = self.client.get_port_settings() {
+                    self.port_settings = Some(ports);
+                    any_ok = true;
+                }
             }
             self.last_slow_refresh = Some(now);
         }
 
-        // 2. Fast/Dynamic refresh: Port statistics (always fetched for live traffic / rates / sparklines)
-        match self.client.get_port_statistics() {
-            Ok(stats) => {
-                // Compute per-port rates from counter deltas
-                let elapsed = self
-                    .prev_stats_time
-                    .map(|t| now.duration_since(t).as_secs_f64().max(0.1))
-                    .unwrap_or(1.0);
+        if !probe_only {
+            // 2. Fast/Dynamic refresh: Port statistics (always fetched for live traffic / rates / sparklines)
+            match self.client.get_port_statistics() {
+                Ok(stats) => {
+                    any_ok = true;
+                    // Compute per-port rates from counter deltas
+                    let elapsed = self
+                        .prev_stats_time
+                        .map(|t| now.duration_since(t).as_secs_f64().max(0.1))
+                        .unwrap_or(1.0);
 
-                let ports_list = stats.ports();
-                let num_ports = ports_list.len();
-                if self.port_rates.len() < num_ports {
-                    self.port_rates
-                        .resize_with(num_ports, PortRateSnapshot::default);
-                }
-                if self.port_histories.len() < num_ports {
-                    self.port_histories.resize_with(num_ports, PortHistory::new);
-                }
+                    let ports_list = stats.ports();
+                    let num_ports = ports_list.len();
+                    if self.port_rates.len() < num_ports {
+                        self.port_rates
+                            .resize_with(num_ports, PortRateSnapshot::default);
+                    }
+                    if self.port_histories.len() < num_ports {
+                        self.port_histories.resize_with(num_ports, PortHistory::new);
+                    }
 
-                let prev_ports = self.prev_port_stats.as_ref().map(|p| p.ports());
+                    let prev_ports = self.prev_port_stats.as_ref().map(|p| p.ports());
 
-                if let Some(prev_ports) = prev_ports {
-                    for (i, p) in stats.ports().iter().enumerate() {
-                        let prev = prev_ports.get(i);
-                        let tx: f64 = p.tx_good_pkt.parse().unwrap_or(0.0);
-                        let rx: f64 = p.rx_good_pkt.parse().unwrap_or(0.0);
-                        let tx_bad: f64 = p.tx_bad_pkt.parse().unwrap_or(0.0);
-                        let rx_bad: f64 = p.rx_bad_pkt.parse().unwrap_or(0.0);
+                    if let Some(prev_ports) = prev_ports {
+                        for (i, p) in stats.ports().iter().enumerate() {
+                            let prev = prev_ports.get(i);
+                            let tx: f64 = p.tx_good_pkt.parse().unwrap_or(0.0);
+                            let rx: f64 = p.rx_good_pkt.parse().unwrap_or(0.0);
+                            let tx_bad: f64 = p.tx_bad_pkt.parse().unwrap_or(0.0);
+                            let rx_bad: f64 = p.rx_bad_pkt.parse().unwrap_or(0.0);
 
-                        if let Some(pp) = prev {
-                            let ptx: f64 = pp.tx_good_pkt.parse().unwrap_or(0.0);
-                            let prx: f64 = pp.rx_good_pkt.parse().unwrap_or(0.0);
-                            let ptx_bad: f64 = pp.tx_bad_pkt.parse().unwrap_or(0.0);
-                            let prx_bad: f64 = pp.rx_bad_pkt.parse().unwrap_or(0.0);
+                            if let Some(pp) = prev {
+                                let ptx: f64 = pp.tx_good_pkt.parse().unwrap_or(0.0);
+                                let prx: f64 = pp.rx_good_pkt.parse().unwrap_or(0.0);
+                                let ptx_bad: f64 = pp.tx_bad_pkt.parse().unwrap_or(0.0);
+                                let prx_bad: f64 = pp.rx_bad_pkt.parse().unwrap_or(0.0);
 
-                            let tx_rate = ((tx - ptx).max(0.0) / elapsed) as u64;
-                            let rx_rate = ((rx - prx).max(0.0) / elapsed) as u64;
-                            let tx_err = ((tx_bad - ptx_bad).max(0.0) / elapsed) as u64;
-                            let rx_err = ((rx_bad - prx_bad).max(0.0) / elapsed) as u64;
+                                let tx_rate = ((tx - ptx).max(0.0) / elapsed) as u64;
+                                let rx_rate = ((rx - prx).max(0.0) / elapsed) as u64;
+                                let tx_err = ((tx_bad - ptx_bad).max(0.0) / elapsed) as u64;
+                                let rx_err = ((rx_bad - prx_bad).max(0.0) / elapsed) as u64;
 
-                            self.port_rates[i] = PortRateSnapshot {
-                                tx_rate,
-                                rx_rate,
-                                tx_err_rate: tx_err,
-                                rx_err_rate: rx_err,
-                            };
+                                self.port_rates[i] = PortRateSnapshot {
+                                    tx_rate,
+                                    rx_rate,
+                                    tx_err_rate: tx_err,
+                                    rx_err_rate: rx_err,
+                                };
 
-                            // Push total good + bad rate to sparkline history
-                            self.port_histories[i].push(tx_rate + rx_rate + tx_err + rx_err);
-                        } else {
-                            // New port appeared (shouldn't normally happen)
+                                // Push total good + bad rate to sparkline history
+                                self.port_histories[i].push(tx_rate + rx_rate + tx_err + rx_err);
+                            } else {
+                                // New port appeared (shouldn't normally happen)
+                                self.port_rates[i] = PortRateSnapshot::default();
+                                self.port_histories[i].push(0);
+                            }
+                        }
+                    } else {
+                        // First refresh — no deltas yet, push zeros
+                        for (i, _p) in stats.ports().iter().enumerate() {
                             self.port_rates[i] = PortRateSnapshot::default();
                             self.port_histories[i].push(0);
                         }
                     }
-                } else {
-                    // First refresh — no deltas yet, push zeros
-                    for (i, _p) in stats.ports().iter().enumerate() {
-                        self.port_rates[i] = PortRateSnapshot::default();
-                        self.port_histories[i].push(0);
-                    }
-                }
 
-                self.prev_port_stats = self.port_stats.take();
-                self.prev_stats_time = Some(now);
-                self.port_stats = Some(stats);
-                self.error = None;
-            }
-            Err(e) => {
-                self.error = Some(format!("Port stats: {}", e));
-            }
-        }
-
-        // 3. Dynamic MAC table: fetch when in Ports (pane 0 has split view) or MAC (pane 1)
-        if active_pane == 0 || active_pane == 1 || force_full {
-            match self.client.get_dynamic_mac_entries() {
-                Ok(entries) => {
-                    // Track MAC churn: absolute change in entry count
-                    let new_count = entries.len();
-                    if let Some(prev) = self.prev_mac_count {
-                        self.mac_churn = (new_count as i64 - prev as i64).unsigned_abs();
-                    } else {
-                        self.mac_churn = 0;
-                    }
-                    self.prev_mac_count = Some(new_count);
-                    self.mac_entries = Some(entries);
+                    self.prev_port_stats = self.port_stats.take();
+                    self.prev_stats_time = Some(now);
+                    self.port_stats = Some(stats);
+                    self.error = None;
                 }
                 Err(e) => {
-                    if self.error.is_none() {
-                        self.error = Some(format!("MAC: {}", e));
-                    }
+                    self.error = Some(format!("Port stats: {}", e));
                 }
             }
-        }
 
-        // 4. Lazy-fetch Config pane data: ONLY when active_pane == 2
-        if active_pane == 2 {
-            let need_config = force_full
-                || self.network_settings.is_none()
-                || self
-                    .last_config_refresh
-                    .map(|t| now.duration_since(t) >= Duration::from_secs(60))
-                    .unwrap_or(true);
-
-            if need_config {
-                self.network_settings = self.client.get_network_settings().ok();
-                self.port_vlan = self.client.get_port_vlan().ok();
-                self.stp_config = self.client.get_stp_config().ok();
-                self.igmp_config = self.client.get_igmp_config().ok();
-                self.storm_control = self.client.get_storm_control().ok();
-                self.port_mirror = self.client.get_port_mirror().ok();
-                self.trunk_config = self.client.get_trunk_config().ok();
-                self.last_config_refresh = Some(now);
+            // 3. Dynamic MAC table: fetch when in Ports (pane 0 has split view) or MAC (pane 1),
+            //    but no more often than MAC_REFRESH_INTERVAL (heavy ASIC dump on the switch)
+            if active_pane == 0 || active_pane == 1 || force_full {
+                let mac_due = force_full
+                    || self.mac_entries.is_none()
+                    || self
+                        .last_mac_refresh
+                        .map(|t| now.duration_since(t) >= MAC_REFRESH_INTERVAL)
+                        .unwrap_or(true);
+                if mac_due {
+                    match self.client.get_dynamic_mac_entries() {
+                        Ok(entries) => {
+                            any_ok = true;
+                            // Track MAC churn: absolute change in entry count
+                            let new_count = entries.len();
+                            if let Some(prev) = self.prev_mac_count {
+                                self.mac_churn = (new_count as i64 - prev as i64).unsigned_abs();
+                            } else {
+                                self.mac_churn = 0;
+                            }
+                            self.prev_mac_count = Some(new_count);
+                            self.mac_entries = Some(entries);
+                        }
+                        Err(e) => {
+                            if self.error.is_none() {
+                                self.error = Some(format!("MAC: {}", e));
+                            }
+                        }
+                    }
+                    // Record the attempt (success or failure) so a failing MAC
+                    // endpoint is not retried on every tick.
+                    self.last_mac_refresh = Some(now);
+                }
             }
-        }
 
+            // 4. Lazy-fetch Config pane data: ONLY when active_pane == 2
+            if active_pane == 2 {
+                let need_config = force_full
+                    || self.network_settings.is_none()
+                    || self
+                        .last_config_refresh
+                        .map(|t| now.duration_since(t) >= Duration::from_secs(60))
+                        .unwrap_or(true);
+
+                if need_config {
+                    self.network_settings = self.client.get_network_settings().ok();
+                    self.port_vlan = self.client.get_port_vlan().ok();
+                    self.stp_config = self.client.get_stp_config().ok();
+                    self.igmp_config = self.client.get_igmp_config().ok();
+                    self.storm_control = self.client.get_storm_control().ok();
+                    self.port_mirror = self.client.get_port_mirror().ok();
+                    self.trunk_config = self.client.get_trunk_config().ok();
+                    self.last_config_refresh = Some(now);
+                }
+            }
+        } // !probe_only
+
+        self.consecutive_failed_refreshes = if any_ok {
+            0
+        } else {
+            self.consecutive_failed_refreshes.saturating_add(1)
+        };
         self.last_refresh = Some(chrono::Local::now());
     }
 }
@@ -247,6 +283,15 @@ impl SwitchData {
 
 /// Maximum number of data points in the ring buffer (~3 min at 3s refresh).
 const HISTORY_MAX: usize = 60;
+
+/// After this many consecutive fully-failed refreshes, retry with a single
+/// probe request instead of the full burst until the switch responds again.
+const OUTAGE_PROBE_THRESHOLD: u32 = 2;
+
+/// Minimum cadence for the dynamic MAC table fetch. The endpoint forces a
+/// full ASIC L2 table dump on the switch CPU, so it must not follow the fast
+/// refresh interval.
+const MAC_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Pre-computed per-port rates (packets/s) from the last refresh delta.
 #[derive(Clone, Default)]
@@ -2200,5 +2245,57 @@ fn format_rate(rate: u64) -> String {
         format!("{:.1}K", rate as f64 / 1_000.0)
     } else {
         rate.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mock_switch_data() -> SwitchData {
+        let target = SwitchTarget {
+            name: "test".to_string(),
+            host: "192.168.1.1".to_string(),
+            user: "admin".to_string(),
+            password: "password123".to_string(),
+        };
+        SwitchData::new(target, true).expect("mock SwitchData")
+    }
+
+    #[test]
+    fn mac_fetch_respects_cadence_gate() {
+        let mut sd = mock_switch_data();
+        sd.refresh(1, true); // force_full fetches the MAC table
+        let after_full = sd.last_mac_refresh;
+        assert!(after_full.is_some());
+        assert!(sd.mac_entries.is_some());
+
+        // Within the cadence window: MAC fetch is skipped
+        sd.refresh(1, false);
+        assert_eq!(sd.last_mac_refresh, after_full);
+
+        // Backdate past the cadence window: fetched again
+        sd.last_mac_refresh = sd
+            .last_mac_refresh
+            .and_then(|t| t.checked_sub(MAC_REFRESH_INTERVAL + Duration::from_secs(1)));
+        assert!(sd.last_mac_refresh.is_some());
+        sd.refresh(1, false);
+        assert_ne!(sd.last_mac_refresh, after_full);
+    }
+
+    #[test]
+    fn outage_guard_probes_single_request_then_recovers() {
+        let mut sd = mock_switch_data();
+        sd.consecutive_failed_refreshes = OUTAGE_PROBE_THRESHOLD;
+        sd.refresh(0, false);
+        // Probe succeeded (mock): streak reset, heavy fetches skipped this tick
+        assert_eq!(sd.consecutive_failed_refreshes, 0);
+        assert!(sd.mac_entries.is_none());
+        assert!(sd.system_info.is_some());
+
+        // Next tick is a full refresh again
+        sd.refresh(0, false);
+        assert!(sd.mac_entries.is_some());
+        assert!(sd.port_stats.is_some());
     }
 }

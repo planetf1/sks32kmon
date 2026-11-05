@@ -139,7 +139,7 @@ pub enum ShowCommand {
         #[arg(short = 'w', long = "watch")]
         watch: bool,
 
-        /// Refresh interval in seconds when watching (default: 2s)
+        /// Refresh interval in seconds when watching (default: 5s, minimum 3s)
         #[arg(short = 'i', long = "interval")]
         interval: Option<u64>,
     },
@@ -657,7 +657,9 @@ fn cmd_statistics(
     watch: bool,
     interval: Option<u64>,
 ) -> Result<()> {
-    let poll_interval = interval.unwrap_or(2).max(1);
+    // Default and floor chosen to be gentle on the embedded switch web server:
+    // 2s polling of port statistics has caused it to freeze on real hardware.
+    let poll_interval = interval.unwrap_or(5).max(3);
     let mut prev_stats: Option<crate::models::PortStatisticsResponse> = None;
     let mut prev_time: Option<std::time::Instant> = None;
 

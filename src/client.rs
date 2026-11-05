@@ -42,13 +42,17 @@ impl SwitchClient {
         let base_url = format!("http://{}", host);
         let cookie_jar = Arc::new(Jar::default());
 
-        // Configure HTTP client with tight socket pooling to avoid leaking idle
-        // connections and exhausting switch file descriptors.
+        // Configure HTTP client for gentle treatment of the embedded switch:
+        // one persistent keep-alive connection reused across refresh ticks, so
+        // the switch does not see a fresh TCP handshake (and socket churn) on
+        // every poll.
         let http = HttpClient::builder()
             .cookie_store(true)
             .cookie_provider(cookie_jar.clone())
             .pool_max_idle_per_host(1)
-            .pool_idle_timeout(Duration::from_secs(5))
+            // Stay idle across refresh ticks (TUI interval is clamped to
+            // 3-60s; CLI watch defaults to 5s) instead of closing between polls.
+            .pool_idle_timeout(Duration::from_secs(60))
             .tcp_keepalive(Some(Duration::from_secs(15)))
             .timeout(Duration::from_secs(10))
             .build()
