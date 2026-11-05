@@ -475,6 +475,61 @@ impl Theme {
         }
     }
 
+    /// Background painted over the whole frame. Every theme owns its
+    /// background so foreground colours never depend on the terminal's own
+    /// (light or dark) appearance.
+    pub fn bg(&self) -> Color {
+        match self {
+            Theme::Dark => Color::Rgb(18, 18, 22),
+            Theme::Light => Color::Rgb(250, 250, 250),
+        }
+    }
+
+    /// Healthy / link-up / good.
+    pub fn ok(&self) -> Color {
+        match self {
+            Theme::Dark => Color::Green,
+            Theme::Light => Color::Rgb(0, 120, 40),
+        }
+    }
+
+    /// Caution / degraded / key hints.
+    pub fn warn(&self) -> Color {
+        match self {
+            Theme::Dark => Color::Yellow,
+            Theme::Light => Color::Rgb(160, 90, 0),
+        }
+    }
+
+    /// Errors / disabled.
+    pub fn err(&self) -> Color {
+        match self {
+            Theme::Dark => Color::Red,
+            Theme::Light => Color::Rgb(190, 0, 0),
+        }
+    }
+
+    /// Highlight for the fastest link speed.
+    pub fn accent(&self) -> Color {
+        match self {
+            Theme::Dark => Color::Magenta,
+            Theme::Light => Color::Rgb(140, 0, 140),
+        }
+    }
+
+    /// Pick the initial theme from the terminal's `COLORFGBG` ("fg;bg"),
+    /// where set: background colour index 7 or 15 means a light terminal.
+    pub fn detect() -> Self {
+        Self::from_colorfgbg(std::env::var("COLORFGBG").ok().as_deref())
+    }
+
+    fn from_colorfgbg(value: Option<&str>) -> Self {
+        match value.and_then(|v| v.rsplit(';').next()) {
+            Some("7") | Some("15") => Theme::Light,
+            _ => Theme::Dark,
+        }
+    }
+
     pub fn footer_bg(&self) -> Color {
         match self {
             Theme::Dark => Color::Black,
@@ -565,7 +620,7 @@ pub fn run_tui(targets: &[SwitchTarget], mock: bool, initial_interval: Option<u6
         scroll_offset_mac: 0,
         active_pane: 0,
         refresh_interval: interval,
-        theme: Theme::Dark,
+        theme: Theme::detect(),
         config_cursor: 0,
         config_scroll: 0,
         editing: false,
@@ -748,6 +803,12 @@ pub fn run_tui(targets: &[SwitchTarget], mock: bool, initial_interval: Option<u6
 
 fn draw_ui(f: &mut Frame, app: &TuiApp) {
     let area = f.area();
+    // Paint the theme's own background and default foreground first: unstyled
+    // text inherits these instead of the terminal's colours.
+    f.render_widget(
+        Block::default().style(Style::default().bg(app.theme.bg()).fg(app.theme.fg())),
+        area,
+    );
 
     let constraints = [
         Constraint::Length(4),
@@ -824,12 +885,14 @@ fn render_header(f: &mut Frame, app: &TuiApp, area: Rect) {
             let (temp_icon, temp_style) = if temp_val >= 68 {
                 (
                     "🔥",
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(app.theme.err())
+                        .add_modifier(Modifier::BOLD),
                 )
             } else if temp_val >= 58 {
-                ("♨", Style::default().fg(Color::Yellow))
+                ("♨", Style::default().fg(app.theme.warn()))
             } else if temp_val >= 48 {
-                ("☕", Style::default().fg(Color::Green))
+                ("☕", Style::default().fg(app.theme.ok()))
             } else {
                 ("❄", Style::default().fg(app.theme.primary()))
             };
@@ -840,7 +903,7 @@ fn render_header(f: &mut Frame, app: &TuiApp, area: Rect) {
 
             // Ports up badge
             let up_style = if active_count > 0 {
-                Style::default().fg(Color::Green)
+                Style::default().fg(app.theme.ok())
             } else {
                 Style::default().fg(app.theme.dim())
             };
@@ -858,7 +921,7 @@ fn render_header(f: &mut Frame, app: &TuiApp, area: Rect) {
         None => {
             spans.push(Span::styled(
                 "Connecting...",
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(app.theme.warn()),
             ));
         }
     }
@@ -875,7 +938,7 @@ fn render_header(f: &mut Frame, app: &TuiApp, area: Rect) {
             switch_pills.push(Span::styled(
                 label,
                 Style::default()
-                    .fg(Color::Black)
+                    .fg(app.theme.bg())
                     .bg(app.theme.primary())
                     .add_modifier(Modifier::BOLD),
             ));
@@ -1008,12 +1071,12 @@ fn render_port_pane(f: &mut Frame, app: &TuiApp, area: Rect) {
         .map(|(i, p)| {
             let port_num = i + 1;
             let status_style = if p.port_status == "Disabled" {
-                Style::default().fg(Color::Red)
+                Style::default().fg(app.theme.err())
             } else if p.link_status == "Link Down" {
                 Style::default().fg(app.theme.dim())
             } else {
                 Style::default()
-                    .fg(Color::Green)
+                    .fg(app.theme.ok())
                     .add_modifier(Modifier::BOLD)
             };
 
@@ -1033,13 +1096,13 @@ fn render_port_pane(f: &mut Frame, app: &TuiApp, area: Rect) {
 
             let speed_style = match speed_str {
                 "10G" => Style::default()
-                    .fg(Color::Magenta)
+                    .fg(app.theme.accent())
                     .add_modifier(Modifier::BOLD),
                 "2.5G" => Style::default()
                     .fg(app.theme.primary())
                     .add_modifier(Modifier::BOLD),
-                "1G" => Style::default().fg(Color::Green),
-                "100M" => Style::default().fg(Color::Yellow),
+                "1G" => Style::default().fg(app.theme.ok()),
+                "100M" => Style::default().fg(app.theme.warn()),
                 _ => Style::default().fg(app.theme.dim()),
             };
 
@@ -1068,12 +1131,16 @@ fn render_port_pane(f: &mut Frame, app: &TuiApp, area: Rect) {
             };
 
             let tx_err_style = if rates.tx_err_rate > 0 {
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(app.theme.err())
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(app.theme.dim())
             };
             let rx_err_style = if rates.rx_err_rate > 0 {
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(app.theme.err())
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(app.theme.dim())
             };
@@ -1095,13 +1162,15 @@ fn render_port_pane(f: &mut Frame, app: &TuiApp, area: Rect) {
             };
 
             let err_style = if err_pct > 1.0 {
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(app.theme.err())
+                    .add_modifier(Modifier::BOLD)
             } else if err_pct > 0.1 {
-                Style::default().fg(Color::Yellow)
+                Style::default().fg(app.theme.warn())
             } else if total_pkts == 0 || total_errs == 0 {
                 Style::default().fg(app.theme.dim())
             } else {
-                Style::default().fg(Color::Green)
+                Style::default().fg(app.theme.ok())
             };
 
             // Accumulate aggregates for the summary row
@@ -1866,7 +1935,7 @@ fn render_config_pane(f: &mut Frame, app: &TuiApp, area: Rect) {
 
     if app.editing {
         lines.push(Line::from(vec![
-            Span::styled(" EDITING: ", Style::default().fg(Color::Yellow)),
+            Span::styled(" EDITING: ", Style::default().fg(app.theme.warn())),
             Span::styled(
                 &app.edit_buffer,
                 Style::default()
@@ -1907,7 +1976,7 @@ fn render_config_pane(f: &mut Frame, app: &TuiApp, area: Rect) {
             lines.push(Line::from(vec![Span::styled(
                 format!("{}{}", cursor, field.label),
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(app.theme.warn())
                     .add_modifier(Modifier::BOLD),
             )]));
         } else {
@@ -2267,12 +2336,12 @@ fn render_footer(f: &mut Frame, app: &TuiApp, area: Rect) {
     };
 
     let mut parts = vec![
-        Span::styled(" [q] Quit ", Style::default().fg(Color::Yellow)),
-        Span::styled(" [r] Refresh ", Style::default().fg(Color::Yellow)),
-        Span::styled(" [t] Theme ", Style::default().fg(Color::Yellow)),
+        Span::styled(" [q] Quit ", Style::default().fg(app.theme.warn())),
+        Span::styled(" [r] Refresh ", Style::default().fg(app.theme.warn())),
+        Span::styled(" [t] Theme ", Style::default().fg(app.theme.warn())),
         Span::styled(
             format!(" [+/-] {}s ", app.refresh_interval),
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(app.theme.warn()),
         ),
         Span::styled(
             format!(" [←→] {} ", switch_label),
@@ -2286,7 +2355,7 @@ fn render_footer(f: &mut Frame, app: &TuiApp, area: Rect) {
     if let Some(err) = &current.error {
         parts.push(Span::styled(
             format!(" | ERROR: {}", err),
-            Style::default().fg(Color::Red),
+            Style::default().fg(app.theme.err()),
         ));
     }
 
@@ -2420,5 +2489,71 @@ mod tests {
         note_failure(&e, &mut any_ok, &mut down);
         assert!(down);
         assert!(!any_ok);
+    }
+
+    #[test]
+    fn theme_detects_light_terminal_from_colorfgbg() {
+        assert!(Theme::from_colorfgbg(Some("0;15")) == Theme::Light);
+        assert!(Theme::from_colorfgbg(Some("0;default;7")) == Theme::Light);
+        assert!(Theme::from_colorfgbg(Some("15;0")) == Theme::Dark);
+        assert!(Theme::from_colorfgbg(None) == Theme::Dark);
+    }
+
+    /// Every visible glyph must have an explicit foreground that differs from
+    /// its background: `Reset` would inherit the terminal's colours, which is
+    /// how white-on-white text appeared on a light terminal.
+    #[test]
+    fn every_glyph_is_readable_in_both_themes() {
+        use ratatui::backend::TestBackend;
+
+        for theme in [Theme::Dark, Theme::Light] {
+            for pane in 0..3 {
+                let mut sd = mock_switch_data();
+                sd.refresh(pane, true);
+                let app = TuiApp {
+                    switches: vec![sd],
+                    current_switch: 0,
+                    scroll_offset_port: 0,
+                    scroll_offset_mac: 0,
+                    active_pane: pane,
+                    refresh_interval: 10,
+                    theme,
+                    config_cursor: 0,
+                    config_scroll: 0,
+                    editing: false,
+                    edit_buffer: String::new(),
+                };
+                let mut terminal = Terminal::new(TestBackend::new(140, 45)).unwrap();
+                terminal.draw(|f| draw_ui(f, &app)).unwrap();
+                let buf = terminal.backend().buffer();
+                for y in 0..buf.area.height {
+                    for x in 0..buf.area.width {
+                        let cell = &buf[(x, y)];
+                        if cell.symbol().trim().is_empty() {
+                            continue;
+                        }
+                        assert!(
+                            cell.fg != Color::Reset && cell.bg != Color::Reset,
+                            "{} theme, pane {}: '{}' at ({},{}) uses terminal default colours",
+                            theme.name(),
+                            pane,
+                            cell.symbol(),
+                            x,
+                            y
+                        );
+                        assert!(
+                            cell.fg != cell.bg,
+                            "{} theme, pane {}: '{}' at ({},{}) has fg == bg ({:?})",
+                            theme.name(),
+                            pane,
+                            cell.symbol(),
+                            x,
+                            y,
+                            cell.fg
+                        );
+                    }
+                }
+            }
+        }
     }
 }
