@@ -695,6 +695,15 @@ fn test_port_statistics_large_values() {
 #[cfg(feature = "cli")]
 mod cli_tests {
     use clap::Parser;
+
+    #[test]
+    fn test_watch_interval_default_and_floor() {
+        use sks3200::cli::watch_interval;
+        assert_eq!(watch_interval(None), 5);
+        assert_eq!(watch_interval(Some(1)), 3);
+        assert_eq!(watch_interval(Some(3)), 3);
+        assert_eq!(watch_interval(Some(10)), 10);
+    }
     use sks3200::cli::{Args, Command, SetCommand, ShowCommand};
 
     #[test]

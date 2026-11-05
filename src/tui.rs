@@ -101,7 +101,14 @@ impl SwitchData {
         // probe with a single cheap request instead of the full burst — a
         // struggling embedded web server needs fewer requests, not more.
         let probe_only = self.consecutive_failed_refreshes >= OUTAGE_PROBE_THRESHOLD;
+        // `any_ok` means "the switch answered": any HTTP response counts, even
+        // an error status or an unparseable body. Only transport failures
+        // (timeout, connect) count towards the outage guard, so a single broken
+        // endpoint cannot pin the TUI in probe mode while the switch is up.
         let mut any_ok = false;
+        // Set on the first transport failure: the rest of this refresh's burst
+        // is skipped rather than queued against an unreachable server.
+        let mut transport_down = false;
 
         // 1. Slow refresh (system info & port admin status): initial load or every 60s or on force_full
         let need_slow = probe_only
@@ -121,22 +128,26 @@ impl SwitchData {
                     any_ok = true;
                 }
                 Err(e) => {
+                    note_failure(&e, &mut any_ok, &mut transport_down);
                     if self.system_info.is_none() || probe_only {
                         self.error = Some(format!("Status: {}", e));
                     }
                 }
             }
 
-            if !probe_only {
-                if let Ok(ports) = self.client.get_port_settings() {
-                    self.port_settings = Some(ports);
-                    any_ok = true;
+            if !probe_only && !transport_down {
+                match self.client.get_port_settings() {
+                    Ok(ports) => {
+                        self.port_settings = Some(ports);
+                        any_ok = true;
+                    }
+                    Err(e) => note_failure(&e, &mut any_ok, &mut transport_down),
                 }
             }
             self.last_slow_refresh = Some(now);
         }
 
-        if !probe_only {
+        if !probe_only && !transport_down {
             // 2. Fast/Dynamic refresh: Port statistics (always fetched for live traffic / rates / sparklines)
             match self.client.get_port_statistics() {
                 Ok(stats) => {
@@ -207,13 +218,14 @@ impl SwitchData {
                     self.error = None;
                 }
                 Err(e) => {
+                    note_failure(&e, &mut any_ok, &mut transport_down);
                     self.error = Some(format!("Port stats: {}", e));
                 }
             }
 
             // 3. Dynamic MAC table: fetch when in Ports (pane 0 has split view) or MAC (pane 1),
             //    but no more often than MAC_REFRESH_INTERVAL (heavy ASIC dump on the switch)
-            if active_pane == 0 || active_pane == 1 || force_full {
+            if !transport_down && (active_pane == 0 || active_pane == 1 || force_full) {
                 let mac_due = force_full
                     || self
                         .last_mac_refresh
@@ -234,6 +246,7 @@ impl SwitchData {
                             self.mac_entries = Some(entries);
                         }
                         Err(e) => {
+                            note_failure(&e, &mut any_ok, &mut transport_down);
                             if self.error.is_none() {
                                 self.error = Some(format!("MAC: {}", e));
                             }
@@ -246,7 +259,7 @@ impl SwitchData {
             }
 
             // 4. Lazy-fetch Config pane data: ONLY when active_pane == 2
-            if active_pane == 2 {
+            if !transport_down && active_pane == 2 {
                 let need_config = force_full
                     || self.network_settings.is_none()
                     || self
@@ -260,13 +273,16 @@ impl SwitchData {
                     let mut cfg_err: Option<String> = None;
                     macro_rules! fetch_cfg {
                         ($field:ident, $call:expr, $name:literal) => {
-                            match $call {
-                                Ok(v) => {
-                                    self.$field = Some(v);
-                                    any_ok = true;
-                                }
-                                Err(e) => {
-                                    cfg_err.get_or_insert_with(|| format!("{}: {}", $name, e));
+                            if !transport_down {
+                                match $call {
+                                    Ok(v) => {
+                                        self.$field = Some(v);
+                                        any_ok = true;
+                                    }
+                                    Err(e) => {
+                                        note_failure(&e, &mut any_ok, &mut transport_down);
+                                        cfg_err.get_or_insert_with(|| format!("{}: {}", $name, e));
+                                    }
                                 }
                             }
                         };
@@ -308,6 +324,25 @@ impl SwitchData {
             self.consecutive_failed_refreshes.saturating_add(1)
         };
         self.last_refresh = Some(chrono::Local::now());
+    }
+}
+
+/// True when the request never got an HTTP response (timeout or connect
+/// failure), as opposed to the switch answering with an error or bad body.
+fn is_transport_error(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        c.downcast_ref::<reqwest::Error>()
+            .is_some_and(|r| r.is_timeout() || r.is_connect())
+    })
+}
+
+/// Classify a failed request for the outage guard.
+fn note_failure(e: &anyhow::Error, any_ok: &mut bool, transport_down: &mut bool) {
+    if is_transport_error(e) {
+        *transport_down = true;
+    } else {
+        // The switch answered, just not with what we wanted.
+        *any_ok = true;
     }
 }
 
@@ -2359,5 +2394,31 @@ mod tests {
         assert!(sd.trunk_config.is_some());
         assert!(sd.last_config_refresh.is_some());
         assert_eq!(sd.consecutive_failed_refreshes, 0);
+    }
+
+    #[test]
+    fn non_transport_errors_count_as_switch_responding() {
+        let mut any_ok = false;
+        let mut down = false;
+        note_failure(&anyhow::anyhow!("parse error"), &mut any_ok, &mut down);
+        assert!(any_ok);
+        assert!(!down);
+    }
+
+    #[test]
+    fn connect_failure_is_transport_error() {
+        // Loopback port 1 is closed: a local connection refusal, no switch involved.
+        let err = reqwest::blocking::Client::new()
+            .get("http://127.0.0.1:1/")
+            .timeout(Duration::from_secs(2))
+            .send()
+            .expect_err("port 1 should refuse");
+        let e = anyhow::Error::new(err).context("GET status.json failed");
+        assert!(is_transport_error(&e));
+        let mut any_ok = false;
+        let mut down = false;
+        note_failure(&e, &mut any_ok, &mut down);
+        assert!(down);
+        assert!(!any_ok);
     }
 }

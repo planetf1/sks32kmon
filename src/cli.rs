@@ -651,19 +651,30 @@ fn cmd_ports(client: &ApiClient, json: bool) -> Result<()> {
     Ok(())
 }
 
+// Default and floor chosen to be gentle on the embedded switch web server:
+// 2s polling of port statistics has caused it to freeze on real hardware.
+const WATCH_DEFAULT_INTERVAL_SECS: u64 = 5;
+const WATCH_MIN_INTERVAL_SECS: u64 = 3;
+
+/// Effective `show statistics --watch` interval in seconds.
+pub fn watch_interval(requested: Option<u64>) -> u64 {
+    requested
+        .unwrap_or(WATCH_DEFAULT_INTERVAL_SECS)
+        .max(WATCH_MIN_INTERVAL_SECS)
+}
+
 fn cmd_statistics(
     client: &ApiClient,
     json: bool,
     watch: bool,
     interval: Option<u64>,
 ) -> Result<()> {
-    // Default and floor chosen to be gentle on the embedded switch web server:
-    // 2s polling of port statistics has caused it to freeze on real hardware.
-    let poll_interval = interval.unwrap_or(5).max(3);
-    if let Some(i) = interval {
-        if i < 3 {
-            eprintln!("Warning: interval clamped to 3s to prevent switch web server freeze.");
-        }
+    let poll_interval = watch_interval(interval);
+    if interval.is_some_and(|i| i < WATCH_MIN_INTERVAL_SECS) {
+        eprintln!(
+            "Warning: interval clamped to {}s to prevent switch web server freeze.",
+            WATCH_MIN_INTERVAL_SECS
+        );
     }
     let mut prev_stats: Option<crate::models::PortStatisticsResponse> = None;
     let mut prev_time: Option<std::time::Instant> = None;
